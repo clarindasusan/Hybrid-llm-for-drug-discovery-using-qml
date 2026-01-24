@@ -29,6 +29,7 @@ class ModelInference:
         # HF Spaces = CPU by default
         self.llm_device = torch.device("cpu")
         self.qml_device = torch.device("cpu")
+        self.expected_feature_dim = 2053
 
         logger.info("🖥️ Running on CPU (Hugging Face Spaces)")
         logger.info(f"LLM device: {self.llm_device}")
