@@ -5,6 +5,7 @@ from peft import PeftModel
 import os
 from pathlib import Path
 import logging
+import numpy as np
 
 # =========================
 # PATHS (HF Spaces SAFE)
@@ -168,51 +169,63 @@ class ModelInference:
     # DRUG POTENTIAL PREDICTION
     # =========================
     def predict_drug_potential(self, smiles: str) -> dict:
+
         try:
+            # Step 1: Generate features (NEVER block inference)
             features = smiles_to_features(smiles)
 
-            if features is None:
-                return {
-                    "error": "Could not generate features for SMILES",
-                    "prediction": "error",
-                    "probability": 0.0,
-                    "score": 0.0,
-                    "is_promising": False,
-                    "confidence": "low"
-                }
+            feature_status = "ok"
 
+            if features is None:
+                logger.warning(
+                    f"Feature generation failed for SMILES: {smiles}. "
+                    "Using fallback neutral features."
+                )
+
+                features = np.zeros(
+                    self.expected_feature_dim, dtype=np.float32
+                )
+                feature_status = "fallback"
+
+            # Step 2: Convert to tensor
             features_tensor = torch.tensor(
                 features, dtype=torch.float32
             ).unsqueeze(0).to(self.qml_device)
 
+            # Step 3: QML inference
             with torch.no_grad():
                 output_logit = self.qml_model(features_tensor)
                 probability = torch.sigmoid(output_logit).item()
 
+            # Step 4: Decision logic
             is_promising = probability >= 0.5
             confidence_score = abs(probability - 0.5)
 
             confidence = (
-                "high" if confidence_score > 0.3
+                "high" if confidence_score > 0.30
                 else "medium" if confidence_score > 0.15
                 else "low"
             )
 
+            # Step 5: Final response
             return {
                 "prediction": "drug" if is_promising else "not drug",
                 "probability": round(probability, 4),
                 "score": round(probability, 4),
                 "is_promising": is_promising,
-                "confidence": confidence
+                "confidence": confidence,
+                "feature_status": feature_status  # 👈 very important
             }
 
         except Exception as e:
             logger.error("Prediction error", exc_info=True)
+
+            # Even here, don't lie — but don't crash the API
             return {
-                "error": str(e),
-                "prediction": "error",
-                "probability": 0.0,
-                "score": 0.0,
+                "prediction": "unknown",
+                "probability": 0.5,
+                "score": 0.5,
                 "is_promising": False,
-                "confidence": "low"
+                "confidence": "low",
+                "error": str(e)
             }

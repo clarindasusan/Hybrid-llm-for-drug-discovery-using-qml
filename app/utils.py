@@ -15,95 +15,95 @@ os.environ["HF_HUB_CACHE"] = "D:/hf-cache"
 os.environ["TRANSFORMERS_CACHE"] = "D:/hf-cache"
 
 logger = logging.getLogger(__name__)
+def smiles_to_features(smiles: str, n_features: int = 2053) -> np.ndarray | None:
 
-def smiles_to_features(smiles: str, n_features: int = 2053) -> np.ndarray:
     """
-    Convert SMILES string to molecular feature vector
-    
-    Args:
-        smiles: SMILES string
-        n_features: Expected number of features (must match training)
-        
-    Returns:
-        Feature vector as numpy array, or None if invalid
+    Convert SMILES string to molecular feature vector.
+
+    Only returns None if SMILES is truly unparsable.
+    Never blocks inference due to chemistry edge cases.
     """
     try:
-        # Strip whitespace
+
         smiles = smiles.strip()
-        
         if not smiles:
-            logger.warning("Empty SMILES string provided")
-            return None
-        
-        # Parse SMILES
-        mol = Chem.MolFromSmiles(smiles)
-        
+
+            logger.warning("Empty SMILES string")
+            return None  # true invalid input
+
+        # --- STEP 1: Parse SMILES (ONLY hard failure allowed) ---
+        mol = Chem.MolFromSmiles(smiles, sanitize=False)
         if mol is None:
-            logger.warning(f"Invalid SMILES (RDKit parsing failed): {smiles}")
+            logger.warning(f"Unparsable SMILES: {smiles}")
             return None
-        
-        # Sanitize molecule (catches some edge cases)
+
+        # Try sanitization, but DO NOT fail if it breaks
         try:
             Chem.SanitizeMol(mol)
         except Exception as e:
-            logger.warning(f"Molecule sanitization failed for {smiles}: {e}")
-            return None
-        
-        # Generate Morgan fingerprint (2048 bits by default)
+            logger.warning(f"Sanitization failed, continuing anyway: {e}")
+
+        # --- STEP 2: Fingerprint (fallback to zeros) ---
         try:
-            fingerprint = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
-            fp_array = np.array(fingerprint)
+            fingerprint = AllChem.GetMorganFingerprintAsBitVect(
+                mol, radius=2, nBits=2048
+            )
+            fp_array = np.array(fingerprint, dtype=np.float32)
         except Exception as e:
-            logger.error(f"Fingerprint generation failed for {smiles}: {e}")
-            return None
-        
-        # Calculate molecular descriptors (5 descriptors)
-        try:
-            descriptors = np.array([
-                Descriptors.MolWt(mol),              # Molecular weight
-                Descriptors.MolLogP(mol),            # LogP (lipophilicity)
-                Descriptors.NumHDonors(mol),         # Hydrogen bond donors
-                Descriptors.NumHAcceptors(mol),      # Hydrogen bond acceptors
-                Descriptors.TPSA(mol)                # Topological polar surface area
-            ])
-        except Exception as e:
-            logger.error(f"Descriptor calculation failed for {smiles}: {e}")
-            return None
-        
-        # Normalize descriptors (simple min-max scaling)
-        # These ranges are typical for drug-like molecules
+            logger.warning(f"Fingerprint failed, using zeros: {e}")
+            fp_array = np.zeros(2048, dtype=np.float32)
+
+        # --- STEP 3: Descriptors (robust, never fail) ---
+        def safe_descriptor(fn, default=0.0):
+            try:
+                val = fn(mol)
+                if val is None or np.isnan(val) or np.isinf(val):
+                    return default
+                return float(val)
+            except Exception:
+                return default
+
+        descriptors = np.array([
+            safe_descriptor(Descriptors.MolWt),
+            safe_descriptor(Descriptors.MolLogP),
+            safe_descriptor(Descriptors.NumHDonors),
+            safe_descriptor(Descriptors.NumHAcceptors),
+            safe_descriptor(Descriptors.TPSA),
+        ], dtype=np.float32)
+
+        # --- STEP 4: Normalize descriptors ---
         descriptor_ranges = np.array([
-            [0, 1000],    # MolWt range
-            [-5, 10],     # LogP range
-            [0, 10],      # HDonors range
-            [0, 15],      # HAcceptors range
-            [0, 200]      # TPSA range
-        ])
-        
-        normalized_descriptors = np.zeros(5)
-        for i in range(5):
+            [0, 1000],    # MolWt
+            [-5, 10],     # LogP
+            [0, 10],      # H donors
+            [0, 15],      # H acceptors
+            [0, 200],     # TPSA
+        ], dtype=np.float32)
+
+        normalized = np.zeros_like(descriptors)
+        for i in range(len(descriptors)):
             min_val, max_val = descriptor_ranges[i]
-            normalized_descriptors[i] = (descriptors[i] - min_val) / (max_val - min_val)
-            # Clip to [0, 1]
-            normalized_descriptors[i] = np.clip(normalized_descriptors[i], 0, 1)
-        
-        # Combine fingerprint and descriptors
-        features = np.concatenate([fp_array, normalized_descriptors])
-        
-        logger.info(f"Generated features of length {len(features)} for SMILES: {smiles}")
-        
-        # Ensure correct length (pad or truncate if needed)
-        if len(features) < n_features:
-            # Pad with zeros
-            features = np.pad(features, (0, n_features - len(features)), mode='constant')
-        elif len(features) > n_features:
-            # Truncate
+            normalized[i] = (descriptors[i] - min_val) / (max_val - min_val)
+            normalized[i] = np.clip(normalized[i], 0.0, 1.0)
+
+        # --- STEP 5: Combine features ---
+        features = np.concatenate([fp_array, normalized])
+
+        # --- STEP 6: Enforce fixed size ---
+        if features.shape[0] < n_features:
+            
+            features = np.pad(
+                features,
+                (0, n_features - features.shape[0]),
+                mode="constant"
+            )
+        elif features.shape[0] > n_features:
             features = features[:n_features]
-        
+
         return features.astype(np.float32)
-        
-    except Exception as e:
-        logger.error(f"Error converting SMILES to features: {str(e)}", exc_info=True)
+
+    except Exception:
+        logger.exception("Unexpected SMILES feature failure")
         return None
 
 
