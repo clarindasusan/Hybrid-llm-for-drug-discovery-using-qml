@@ -9,7 +9,8 @@ import logging
 # =========================
 # PATHS (HF Spaces SAFE)
 # =========================
-BASE_DIR = Path(__file__).resolve().parent.parent
+
+BASE_DIR = Path(__file__).resolve().parent  # root folder
 MODEL_DIR = BASE_DIR / "models" / "biogpt-lora-finetuned"
 QML_MODEL_PATH = BASE_DIR / "models" / "qml_model.pth"
 
