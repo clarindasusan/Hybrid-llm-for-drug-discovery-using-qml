@@ -1,19 +1,27 @@
-txt
+# Core ML
+torch==2.1.2
+transformers==4.41.2
+peft==0.18.1
+accelerate==0.27.2
+sacremoses==0.0.53
+
+# API
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
-python-dotenv==1.0.0
-torch==2.1.2
-
-rdkit==2023.9.1
-pennylane==0.33.0
 python-multipart==0.0.6
 pydantic==2.5.0
-numpy==1.24.3
 python-dotenv==1.0.0
+
+# Scientific / QML
+numpy==1.24.3
+pennylane==0.33.0
 autoray==0.6.7
-sacremoses>=0.0.53
-peft==0.18.1
-transformers>=4.41.2
-accelerate>=0.27.0
+
+# Chemistry
+rdkit==2023.9.1
+
+
+
+
 
 
