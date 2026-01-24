@@ -96,6 +96,37 @@ async def health():
         "models_loaded": model_inference is not None,
         "timestamp": datetime.now().isoformat()
     }
+from typing import List
+
+class GenerateRequest(BaseModel):
+    disease: str = Field(..., description="Name of the disease")
+    num_candidates: int = Field(3, description="Number of molecules to generate", ge=1, le=10)
+
+class GenerateResponse(BaseModel):
+    disease: str
+    molecules: List[str]
+
+@app.post("/generate", response_model=GenerateResponse, tags=["Generation"])
+async def generate_molecules_api(request: GenerateRequest):
+    """Generate candidate molecules for a given disease"""
+    if model_inference is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Models not loaded. Please try again in a moment."
+        )
+
+    try:
+        loop = asyncio.get_event_loop()
+        molecules = await loop.run_in_executor(
+            executor,
+            model_inference.generate_molecules,
+            request.disease,
+            request.num_candidates
+        )
+        return GenerateResponse(disease=request.disease, molecules=molecules)
+    except Exception as e:
+        logger.error(f"Error generating molecules: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict", response_model=PredictResponse, tags=["Prediction"])
 async def predict_drug_potential(request: PredictRequest):
