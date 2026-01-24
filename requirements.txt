@@ -13,3 +13,5 @@ numpy==1.24.3
 python-dotenv==1.0.0
 autoray==0.6.7
 sacremoses>=0.0.53
+peft>=0.6.0
+
