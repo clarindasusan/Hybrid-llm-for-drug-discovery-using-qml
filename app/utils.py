@@ -2,6 +2,7 @@ import numpy as np
 from rdkit import Chem
 from rdkit.Chem import Descriptors, AllChem
 import logging
+import re
 
 import os
 from dotenv import load_dotenv
@@ -121,16 +122,111 @@ def validate_smiles(smiles: str) -> bool:
         return False
 
 
+def fix_parentheses(smiles: str) -> str:
+    """
+    Attempt to fix mismatched parentheses in SMILES string.
+    
+    Args:
+        smiles: SMILES string with potential parentheses issues
+        
+    Returns:
+        SMILES string with balanced parentheses
+    """
+    # Count parentheses
+    open_count = smiles.count('(')
+    close_count = smiles.count(')')
+    
+    if open_count == close_count:
+        return smiles
+    
+    # More opening than closing - add closing parentheses
+    if open_count > close_count:
+        return smiles + ')' * (open_count - close_count)
+    
+    # More closing than opening - try to remove extra closing or add opening
+    # This is trickier, try removing trailing closing parens
+    if close_count > open_count:
+        diff = close_count - open_count
+        # Remove extra closing parentheses from the end
+        result = smiles.rstrip(')')
+        expected_close = close_count - diff
+        result = result + ')' * expected_close
+        return result
+    
+    return smiles
+
+
+def fix_brackets(smiles: str) -> str:
+    """
+    Attempt to fix mismatched brackets in SMILES string.
+    
+    Args:
+        smiles: SMILES string with potential bracket issues
+        
+    Returns:
+        SMILES string with balanced brackets
+    """
+    open_count = smiles.count('[')
+    close_count = smiles.count(']')
+    
+    if open_count == close_count:
+        return smiles
+    
+    if open_count > close_count:
+        return smiles + ']' * (open_count - close_count)
+    
+    if close_count > open_count:
+        # Remove extra closing brackets from the end
+        diff = close_count - open_count
+        result = smiles.rstrip(']')
+        expected_close = close_count - diff
+        result = result + ']' * expected_close
+        return result
+    
+    return smiles
+
+
+def truncate_invalid_suffix(smiles: str) -> str:
+    """
+    If SMILES has a clearly incomplete suffix, try to truncate it.
+    
+    Args:
+        smiles: SMILES string
+        
+    Returns:
+        Truncated SMILES if applicable
+    """
+    # If it ends with an opening parenthesis or bracket, remove incomplete part
+    if smiles.endswith('('):
+        return smiles[:-1]
+    if smiles.endswith('['):
+        return smiles[:-1]
+    
+    # Find the last valid ring closure or complete structure
+    # This is a heuristic - look for common patterns
+    for i in range(len(smiles) - 1, 0, -1):
+        test_smiles = smiles[:i]
+        try:
+            mol = Chem.MolFromSmiles(test_smiles, sanitize=False)
+            if mol is not None:
+                return test_smiles
+        except:
+            continue
+    
+    return smiles
+
+
 def repair_smiles(smiles: str, verbose: bool = False):
     """
     Attempt to repair and validate SMILES strings with multiple fallback strategies.
     
-    This function tries multiple strategies to parse and repair SMILES:
+    This function tries multiple strategies including structural repair:
     1. Direct parsing (most SMILES are already valid)
-    2. Parse without sanitization, then sanitize
-    3. Partial sanitization with error catching
-    4. Remove problematic stereochemistry markers
-    5. InChI round-trip (last resort)
+    2. Fix parentheses/brackets
+    3. Remove stereochemistry
+    4. Truncate incomplete suffixes
+    5. Parse without sanitization
+    6. InChI round-trip
     
     Args:
         smiles: Input SMILES string
@@ -156,7 +252,24 @@ def repair_smiles(smiles: str, verbose: bool = False):
         if verbose:
             logger.debug(f"Strategy 1 failed: {e}")
     
-    # Strategy 2: Parse without sanitization, then sanitize carefully
+    # Strategy 2: Fix structural issues (parentheses, brackets)
+    try:
+        # Fix parentheses
+        fixed = fix_parentheses(smiles)
+        fixed = fix_brackets(fixed)
+        
+        if fixed != smiles:
+            mol = Chem.MolFromSmiles(fixed)
+            if mol is not None:
+                canonical = Chem.MolToSmiles(mol, canonical=True)
+                if verbose:
+                    logger.info(f"✓ Repaired by fixing parentheses/brackets: {smiles[:50]}")
+                return canonical
+    except Exception as e:
+        if verbose:
+            logger.debug(f"Strategy 2 failed: {e}")
+    
+    # Strategy 3: Parse without sanitization, then sanitize carefully
     try:
         mol = Chem.MolFromSmiles(smiles, sanitize=False)
         if mol is not None:
@@ -179,13 +292,16 @@ def repair_smiles(smiles: str, verbose: bool = False):
                     pass
     except Exception as e:
         if verbose:
-            logger.debug(f"Strategy 2 failed: {e}")
+            logger.debug(f"Strategy 3 failed: {e}")
     
-    # Strategy 3: Try removing stereochemistry markers that might be invalid
+    # Strategy 4: Try removing stereochemistry markers
     if '/' in smiles or '\\' in smiles or '@' in smiles:
         try:
-            # Remove stereochemistry markers
             cleaned = smiles.replace('/', '').replace('\\', '').replace('@', '')
+            # Also try fixing parentheses on cleaned version
+            cleaned = fix_parentheses(cleaned)
+            cleaned = fix_brackets(cleaned)
+            
             mol = Chem.MolFromSmiles(cleaned)
             if mol is not None:
                 canonical = Chem.MolToSmiles(mol, canonical=True)
@@ -194,18 +310,36 @@ def repair_smiles(smiles: str, verbose: bool = False):
                 return canonical
         except Exception as e:
             if verbose:
-                logger.debug(f"Strategy 3 failed: {e}")
+                logger.debug(f"Strategy 4 failed: {e}")
     
-    # Strategy 4: Try fixing common notation issues
+    # Strategy 5: Try truncating incomplete suffix
     try:
-        # Common issues: extra spaces, weird brackets, etc.
-        cleaned = smiles.replace(' ', '')
+        truncated = truncate_invalid_suffix(smiles)
+        if truncated != smiles:
+            # Also fix parentheses on truncated version
+            truncated = fix_parentheses(truncated)
+            truncated = fix_brackets(truncated)
+            
+            mol = Chem.MolFromSmiles(truncated)
+            if mol is not None:
+                canonical = Chem.MolToSmiles(mol, canonical=True)
+                if verbose:
+                    logger.info(f"✓ Repaired by truncation: {smiles[:50]} -> {truncated[:50]}")
+                return canonical
+    except Exception as e:
+        if verbose:
+            logger.debug(f"Strategy 5 failed: {e}")
+    
+    # Strategy 6: Try fixing common notation issues
+    try:
+        # Remove spaces and fix double equals
+        cleaned = smiles.replace(' ', '').replace('(=O)(=O)', '(=O)')
+        cleaned = fix_parentheses(cleaned)
+        cleaned = fix_brackets(cleaned)
         
-        # Try parsing the cleaned version
         mol = Chem.MolFromSmiles(cleaned, sanitize=False)
         if mol is not None:
             try:
-                # Try to kekulize and clean up
                 Chem.Kekulize(mol, clearAromaticFlags=True)
                 mol = Chem.RemoveHs(mol)
                 canonical = Chem.MolToSmiles(mol, canonical=True)
@@ -213,7 +347,6 @@ def repair_smiles(smiles: str, verbose: bool = False):
                     logger.info(f"✓ Repaired with kekulization: {smiles[:50]}")
                 return canonical
             except Exception:
-                # Even if kekulization fails, try to get SMILES
                 try:
                     canonical = Chem.MolToSmiles(mol, canonical=True)
                     if canonical:
@@ -224,9 +357,9 @@ def repair_smiles(smiles: str, verbose: bool = False):
                     pass
     except Exception as e:
         if verbose:
-            logger.debug(f"Strategy 4 failed: {e}")
+            logger.debug(f"Strategy 6 failed: {e}")
     
-    # Strategy 5: Try InChI round-trip (last resort)
+    # Strategy 7: Try InChI round-trip (last resort)
     try:
         mol = Chem.MolFromSmiles(smiles, sanitize=False)
         if mol is not None:
@@ -240,7 +373,7 @@ def repair_smiles(smiles: str, verbose: bool = False):
                     return canonical
     except Exception as e:
         if verbose:
-            logger.debug(f"Strategy 5 failed: {e}")
+            logger.debug(f"Strategy 7 failed: {e}")
     
     # All strategies failed
     if verbose:
@@ -296,11 +429,17 @@ def get_smiles_info(smiles: str) -> dict:
         "is_valid": False,
         "can_parse": False,
         "can_sanitize": False,
+        "has_paren_issues": False,
+        "has_bracket_issues": False,
         "repaired": None,
         "error": None
     }
     
     try:
+        # Check for structural issues
+        result["has_paren_issues"] = smiles.count('(') != smiles.count(')')
+        result["has_bracket_issues"] = smiles.count('[') != smiles.count(']')
+        
         # Can we parse it?
         mol = Chem.MolFromSmiles(smiles, sanitize=False)
         result["can_parse"] = mol is not None
