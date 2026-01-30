@@ -15,8 +15,8 @@ os.environ["HF_HUB_CACHE"] = "D:/hf-cache"
 os.environ["TRANSFORMERS_CACHE"] = "D:/hf-cache"
 
 logger = logging.getLogger(__name__)
-def smiles_to_features(smiles: str, n_features: int = 2053) -> np.ndarray | None:
 
+def smiles_to_features(smiles: str, n_features: int = 2053) -> np.ndarray | None:
     """
     Convert SMILES string to molecular feature vector.
 
@@ -24,10 +24,8 @@ def smiles_to_features(smiles: str, n_features: int = 2053) -> np.ndarray | None
     Never blocks inference due to chemistry edge cases.
     """
     try:
-
         smiles = smiles.strip()
         if not smiles:
-
             logger.warning("Empty SMILES string")
             return None  # true invalid input
 
@@ -91,7 +89,6 @@ def smiles_to_features(smiles: str, n_features: int = 2053) -> np.ndarray | None
 
         # --- STEP 6: Enforce fixed size ---
         if features.shape[0] < n_features:
-            
             features = np.pad(
                 features,
                 (0, n_features - features.shape[0]),
@@ -122,33 +119,133 @@ def validate_smiles(smiles: str) -> bool:
         return mol is not None
     except:
         return False
+
+
+def repair_smiles(smiles: str, verbose: bool = False):
+    """
+    Attempt to repair and validate SMILES strings with multiple fallback strategies.
     
-def repair_smiles(smiles: str):
-    try:
-        # Parse without sanitization
-        mol = Chem.MolFromSmiles(smiles, sanitize=False)
-        if mol is None:
-            return None
-
-        # Try sanitization
-        Chem.SanitizeMol(mol)
-
-        # Kekulize (fix aromaticity issues)
-        try:
-            Chem.Kekulize(mol, clearAromaticFlags=True)
-        except:
-            pass
-
-        # Remove explicit hydrogens
-        mol = Chem.RemoveHs(mol)
-
-        # Convert back to canonical SMILES
-        fixed_smiles = Chem.MolToSmiles(mol, canonical=True)
-
-        return fixed_smiles
-
-    except Exception:
+    This function tries multiple strategies to parse and repair SMILES:
+    1. Direct parsing (most SMILES are already valid)
+    2. Parse without sanitization, then sanitize
+    3. Partial sanitization with error catching
+    4. Remove problematic stereochemistry markers
+    5. InChI round-trip (last resort)
+    
+    Args:
+        smiles: Input SMILES string
+        verbose: If True, log repair attempts
+        
+    Returns:
+        Canonical SMILES string if valid/repairable, None otherwise
+    """
+    if not smiles or not smiles.strip():
         return None
+    
+    smiles = smiles.strip()
+    
+    # Strategy 1: Try direct parsing (most SMILES are already valid)
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is not None:
+            canonical = Chem.MolToSmiles(mol, canonical=True)
+            if verbose:
+                logger.info(f"✓ SMILES valid as-is: {smiles[:50]}")
+            return canonical
+    except Exception as e:
+        if verbose:
+            logger.debug(f"Strategy 1 failed: {e}")
+    
+    # Strategy 2: Parse without sanitization, then sanitize carefully
+    try:
+        mol = Chem.MolFromSmiles(smiles, sanitize=False)
+        if mol is not None:
+            # Try full sanitization
+            try:
+                Chem.SanitizeMol(mol)
+                canonical = Chem.MolToSmiles(mol, canonical=True)
+                if verbose:
+                    logger.info(f"✓ Repaired with sanitization: {smiles[:50]}")
+                return canonical
+            except Exception:
+                # If full sanitization fails, try partial
+                try:
+                    Chem.SanitizeMol(mol, catchErrors=True)
+                    canonical = Chem.MolToSmiles(mol, canonical=True)
+                    if verbose:
+                        logger.info(f"✓ Repaired with partial sanitization: {smiles[:50]}")
+                    return canonical
+                except Exception:
+                    pass
+    except Exception as e:
+        if verbose:
+            logger.debug(f"Strategy 2 failed: {e}")
+    
+    # Strategy 3: Try removing stereochemistry markers that might be invalid
+    if '/' in smiles or '\\' in smiles or '@' in smiles:
+        try:
+            # Remove stereochemistry markers
+            cleaned = smiles.replace('/', '').replace('\\', '').replace('@', '')
+            mol = Chem.MolFromSmiles(cleaned)
+            if mol is not None:
+                canonical = Chem.MolToSmiles(mol, canonical=True)
+                if verbose:
+                    logger.info(f"✓ Repaired by removing stereochemistry: {smiles[:50]}")
+                return canonical
+        except Exception as e:
+            if verbose:
+                logger.debug(f"Strategy 3 failed: {e}")
+    
+    # Strategy 4: Try fixing common notation issues
+    try:
+        # Common issues: extra spaces, weird brackets, etc.
+        cleaned = smiles.replace(' ', '')
+        
+        # Try parsing the cleaned version
+        mol = Chem.MolFromSmiles(cleaned, sanitize=False)
+        if mol is not None:
+            try:
+                # Try to kekulize and clean up
+                Chem.Kekulize(mol, clearAromaticFlags=True)
+                mol = Chem.RemoveHs(mol)
+                canonical = Chem.MolToSmiles(mol, canonical=True)
+                if verbose:
+                    logger.info(f"✓ Repaired with kekulization: {smiles[:50]}")
+                return canonical
+            except Exception:
+                # Even if kekulization fails, try to get SMILES
+                try:
+                    canonical = Chem.MolToSmiles(mol, canonical=True)
+                    if canonical:
+                        if verbose:
+                            logger.info(f"✓ Repaired without kekulization: {smiles[:50]}")
+                        return canonical
+                except Exception:
+                    pass
+    except Exception as e:
+        if verbose:
+            logger.debug(f"Strategy 4 failed: {e}")
+    
+    # Strategy 5: Try InChI round-trip (last resort)
+    try:
+        mol = Chem.MolFromSmiles(smiles, sanitize=False)
+        if mol is not None:
+            inchi = Chem.MolToInchi(mol)
+            if inchi:
+                mol_from_inchi = Chem.MolFromInchi(inchi)
+                if mol_from_inchi is not None:
+                    canonical = Chem.MolToSmiles(mol_from_inchi, canonical=True)
+                    if verbose:
+                        logger.info(f"✓ Repaired via InChI: {smiles[:50]}")
+                    return canonical
+    except Exception as e:
+        if verbose:
+            logger.debug(f"Strategy 5 failed: {e}")
+    
+    # All strategies failed
+    if verbose:
+        logger.warning(f"✗ Could not repair SMILES: {smiles[:50]}")
+    return None
 
 
 def get_molecular_properties(smiles: str) -> dict:
@@ -181,3 +278,47 @@ def get_molecular_properties(smiles: str) -> dict:
     except Exception as e:
         logger.error(f"Error getting molecular properties: {str(e)}")
         return {"error": str(e)}
+
+
+def get_smiles_info(smiles: str) -> dict:
+    """
+    Get diagnostic information about a SMILES string.
+    Useful for debugging validation issues.
+    
+    Args:
+        smiles: SMILES string
+        
+    Returns:
+        Dictionary with validation info and repair status
+    """
+    result = {
+        "original": smiles,
+        "is_valid": False,
+        "can_parse": False,
+        "can_sanitize": False,
+        "repaired": None,
+        "error": None
+    }
+    
+    try:
+        # Can we parse it?
+        mol = Chem.MolFromSmiles(smiles, sanitize=False)
+        result["can_parse"] = mol is not None
+        
+        if mol is not None:
+            # Can we sanitize it?
+            try:
+                Chem.SanitizeMol(mol)
+                result["can_sanitize"] = True
+                result["is_valid"] = True
+            except Exception as e:
+                result["error"] = str(e)
+        
+        # Try repair
+        repaired = repair_smiles(smiles, verbose=True)
+        result["repaired"] = repaired
+        
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result
