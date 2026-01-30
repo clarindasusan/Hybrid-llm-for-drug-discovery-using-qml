@@ -122,6 +122,33 @@ def validate_smiles(smiles: str) -> bool:
         return mol is not None
     except:
         return False
+    
+def repair_smiles(smiles: str):
+    try:
+        # Parse without sanitization
+        mol = Chem.MolFromSmiles(smiles, sanitize=False)
+        if mol is None:
+            return None
+
+        # Try sanitization
+        Chem.SanitizeMol(mol)
+
+        # Kekulize (fix aromaticity issues)
+        try:
+            Chem.Kekulize(mol, clearAromaticFlags=True)
+        except:
+            pass
+
+        # Remove explicit hydrogens
+        mol = Chem.RemoveHs(mol)
+
+        # Convert back to canonical SMILES
+        fixed_smiles = Chem.MolToSmiles(mol, canonical=True)
+
+        return fixed_smiles
+
+    except Exception:
+        return None
 
 
 def get_molecular_properties(smiles: str) -> dict:

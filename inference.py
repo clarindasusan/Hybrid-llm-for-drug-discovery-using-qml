@@ -11,22 +11,25 @@ import numpy as np
 # PATHS (HF Spaces SAFE)
 # =========================
 
-BASE_DIR = Path(__file__).resolve().parent  # root folder
+BASE_DIR = Path(__file__).resolve().parent
 MODEL_DIR = BASE_DIR / "models" / "biogpt-lora-finetuned"
 QML_MODEL_PATH = BASE_DIR / "models" / "qml_model.pth"
 
-# Import the model architecture
+# =========================
+# INTERNAL IMPORTS
+# =========================
+
 from app.model_arch import HybridQMLModel
 from app.utils import smiles_to_features
+from app.utils.smiles_repair import repair_smiles
 
 logger = logging.getLogger(__name__)
 
 
 class ModelInference:
     def __init__(self):
-        """Initialize all models on startup - CPU only (HF Spaces compatible)"""
+        """Initialize all models on startup (CPU-only, HF Spaces safe)"""
 
-        # HF Spaces = CPU by default
         self.llm_device = torch.device("cpu")
         self.qml_device = torch.device("cpu")
         self.expected_feature_dim = 2053
@@ -35,7 +38,6 @@ class ModelInference:
         logger.info(f"LLM device: {self.llm_device}")
         logger.info(f"QML device: {self.qml_device}")
 
-        # Load models
         self._load_llm()
         self._load_qml()
 
@@ -47,12 +49,11 @@ class ModelInference:
             model_path = MODEL_DIR.resolve()
             base_model_name = "microsoft/biogpt"
 
-            logger.info(f"Loading BioGPT LoRA from: {model_path}")
-
             if not model_path.exists():
-                raise FileNotFoundError(f"Model path does not exist: {model_path}")
+                raise FileNotFoundError(f"LLM path not found: {model_path}")
 
-            # Tokenizer
+            logger.info(f"Loading BioGPT LoRA from {model_path}")
+
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_path,
                 local_files_only=True,
@@ -62,7 +63,6 @@ class ModelInference:
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            # Base model (HF cache handled automatically)
             base_model = AutoModelForCausalLM.from_pretrained(
                 base_model_name,
                 torch_dtype=torch.float32,
@@ -70,7 +70,6 @@ class ModelInference:
                 trust_remote_code=True
             ).to(self.llm_device)
 
-            # Load LoRA adapter
             self.llm_model = PeftModel.from_pretrained(
                 base_model,
                 model_path,
@@ -78,10 +77,10 @@ class ModelInference:
             ).to(self.llm_device)
 
             self.llm_model.eval()
-            logger.info("✅ BioGPT + LoRA loaded successfully")
+            logger.info("✅ BioGPT + LoRA loaded")
 
-        except Exception as e:
-            logger.error(f"Error loading LLM: {str(e)}")
+        except Exception:
+            logger.error("❌ Failed to load LLM", exc_info=True)
             raise
 
     # =========================
@@ -89,17 +88,13 @@ class ModelInference:
     # =========================
     def _load_qml(self):
         try:
-            qml_path = QML_MODEL_PATH.resolve()
-            n_qubits = int(os.getenv("N_QUBITS", "4"))
+            if not QML_MODEL_PATH.exists():
+                raise FileNotFoundError(f"QML model not found: {QML_MODEL_PATH}")
 
-            logger.info(f"Loading QML model from {qml_path}")
+            checkpoint = torch.load(QML_MODEL_PATH, map_location="cpu")
 
-            if not qml_path.exists():
-                raise FileNotFoundError(f"QML model not found: {qml_path}")
-
-            checkpoint = torch.load(qml_path, map_location=self.qml_device)
-
-            n_features = checkpoint.get("n_features", 2053)
+            n_features = checkpoint.get("n_features", self.expected_feature_dim)
+            n_qubits = checkpoint.get("n_qubits", 4)
 
             self.qml_model = HybridQMLModel(
                 n_features=n_features,
@@ -111,22 +106,18 @@ class ModelInference:
             self.qml_model.to(self.qml_device)
             self.qml_model.eval()
 
-            logger.info("✅ QML model loaded successfully")
+            logger.info("✅ QML model loaded")
 
-        except Exception as e:
-            logger.error(f"Error loading QML model: {str(e)}")
+        except Exception:
+            logger.error("❌ Failed to load QML model", exc_info=True)
             raise
 
     # =========================
     # MOLECULE GENERATION
     # =========================
     def generate_molecules(self, disease: str, num_candidates: int = 3) -> list:
-
         if not disease or not disease.strip():
             raise ValueError("Disease name cannot be empty")
-
-        if not (1 <= num_candidates <= 10):
-            raise ValueError("num_candidates must be between 1 and 10")
 
         max_new_tokens = int(os.getenv("MAX_NEW_TOKENS", "30"))
         temperature = float(os.getenv("TEMPERATURE", "0.9"))
@@ -150,55 +141,65 @@ class ModelInference:
                 temperature=temperature,
                 top_k=50,
                 top_p=0.95,
-                num_beams=1,
                 pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-                use_cache=True
+                eos_token_id=self.tokenizer.eos_token_id
             )
 
-        generated = []
+        repaired_smiles = []
+
         for output in outputs:
             text = self.tokenizer.decode(output, skip_special_tokens=True)
-            smiles = text.split("SMILES:", 1)[-1].strip().replace(" ", "")
-            if smiles:
-                generated.append(smiles)
+            raw_smiles = text.split("SMILES:", 1)[-1].strip().replace(" ", "")
 
-        # Deduplicate
-        return list(dict.fromkeys(generated))[:num_candidates]
+            if not raw_smiles:
+                continue
+
+            fixed = repair_smiles(raw_smiles)
+
+            if fixed:
+                repaired_smiles.append(fixed)
+            else:
+                logger.warning(f"❌ Discarded invalid SMILES: {raw_smiles}")
+
+        # Deduplicate + limit
+        return list(dict.fromkeys(repaired_smiles))[:num_candidates]
 
     # =========================
     # DRUG POTENTIAL PREDICTION
     # =========================
     def predict_drug_potential(self, smiles: str) -> dict:
-
         try:
-            # Step 1: Generate features (NEVER block inference)
-            features = smiles_to_features(smiles)
+            # 🔒 Final SMILES safety check
+            fixed_smiles = repair_smiles(smiles)
 
+            if fixed_smiles is None:
+                return {
+                    "prediction": "invalid",
+                    "probability": 0.0,
+                    "score": 0.0,
+                    "is_promising": False,
+                    "confidence": "low",
+                    "error": "Invalid SMILES after repair"
+                }
+
+            # Step 1: Feature extraction
+            features = smiles_to_features(fixed_smiles)
             feature_status = "ok"
 
             if features is None:
-                logger.warning(
-                    f"Feature generation failed for SMILES: {smiles}. "
-                    "Using fallback neutral features."
-                )
-
-                features = np.zeros(
-                    self.expected_feature_dim, dtype=np.float32
-                )
+                features = np.zeros(self.expected_feature_dim, dtype=np.float32)
                 feature_status = "fallback"
 
-            # Step 2: Convert to tensor
             features_tensor = torch.tensor(
                 features, dtype=torch.float32
-            ).unsqueeze(0).to(self.qml_device)
+            ).unsqueeze(0)
 
-            # Step 3: QML inference
+            # Step 2: QML inference
             with torch.no_grad():
-                output_logit = self.qml_model(features_tensor)
-                probability = torch.sigmoid(output_logit).item()
+                logit = self.qml_model(features_tensor)
+                probability = torch.sigmoid(logit).item()
 
-            # Step 4: Decision logic
+            # Step 3: Decision
             is_promising = probability >= 0.5
             confidence_score = abs(probability - 0.5)
 
@@ -208,20 +209,17 @@ class ModelInference:
                 else "low"
             )
 
-            # Step 5: Final response
             return {
                 "prediction": "drug" if is_promising else "not drug",
                 "probability": round(probability, 4),
                 "score": round(probability, 4),
                 "is_promising": is_promising,
                 "confidence": confidence,
-                "feature_status": feature_status  # 👈 very important
+                "feature_status": feature_status
             }
 
         except Exception as e:
-            logger.error("Prediction error", exc_info=True)
-
-            # Even here, don't lie — but don't crash the API
+            logger.error("❌ Prediction failure", exc_info=True)
             return {
                 "prediction": "unknown",
                 "probability": 0.5,

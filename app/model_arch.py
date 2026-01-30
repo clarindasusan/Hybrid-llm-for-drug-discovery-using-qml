@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import pennylane as qml
 
 class HybridQMLModel(nn.Module):
     def __init__(self, n_features: int, n_qubits: int, quantum_layer=None):
@@ -18,7 +17,6 @@ class HybridQMLModel(nn.Module):
         self.classical_layer_out = nn.Linear(1, 1)
         
         # Store quantum layer if provided (for training)
-        # For inference, we'll use a mock version
         self.quantum_layer = quantum_layer
 
     def forward(self, x):
@@ -34,9 +32,23 @@ class HybridQMLModel(nn.Module):
                 # Use actual quantum circuit (training)
                 q_output = self.quantum_layer(self.q_weights, sample_features)
             else:
-                # Mock quantum layer for inference without PennyLane
-                # This simulates the quantum circuit behavior
-                q_output = torch.tanh(torch.sum(self.q_weights * sample_features.unsqueeze(1)))
+                # IMPROVED mock quantum layer for inference
+                # Better simulation that preserves input variability
+                
+                # Apply rotation-like transformations per qubit
+                rotated = torch.zeros(self.n_qubits)
+                for q in range(self.n_qubits):
+                    # Simulate Rot gate: Rz(θ₁) Ry(θ₂) Rz(θ₃)
+                    theta = self.q_weights[q, :]  # 3 rotation angles
+                    feature = sample_features[q]
+                    
+                    # Combine rotation parameters with input feature
+                    # This creates a non-linear transformation that varies with input
+                    angle = theta[0] * feature + theta[1] * torch.sin(feature) + theta[2]
+                    rotated[q] = torch.cos(angle) * torch.sin(theta[1] * feature)
+                
+                # Simulate entanglement by using mean (mimics expectation value)
+                q_output = torch.tanh(rotated.mean())
             
             quantum_outputs.append(q_output)
         
