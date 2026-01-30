@@ -21,7 +21,7 @@ QML_MODEL_PATH = BASE_DIR / "models" / "qml_model.pth"
 
 from app.model_arch import HybridQMLModel
 from app.utils import smiles_to_features
-from app.utils.smiles_repair import repair_smiles
+from app.utils import repair_smiles
 
 logger = logging.getLogger(__name__)
 
