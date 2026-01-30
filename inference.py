@@ -21,7 +21,7 @@ QML_MODEL_PATH = BASE_DIR / "models" / "qml_model.pth"
 
 from app.model_arch import HybridQMLModel
 from app.utils import smiles_to_features
-from app.utils import repair_smiles
+from app.utils import repair_smiles  # Import repair function
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +113,13 @@ class ModelInference:
             raise
 
     # =========================
-    # MOLECULE GENERATION
+    # MOLECULE GENERATION (NO VALIDATION)
     # =========================
     def generate_molecules(self, disease: str, num_candidates: int = 3) -> list:
+        """
+        Generate raw SMILES strings for a disease.
+        NO validation or repair - returns exactly what the model generates.
+        """
         if not disease or not disease.strip():
             raise ValueError("Disease name cannot be empty")
 
@@ -145,31 +149,28 @@ class ModelInference:
                 eos_token_id=self.tokenizer.eos_token_id
             )
 
-        repaired_smiles = []
+        raw_smiles = []
 
         for output in outputs:
             text = self.tokenizer.decode(output, skip_special_tokens=True)
-            raw_smiles = text.split("SMILES:", 1)[-1].strip().replace(" ", "")
+            smiles = text.split("SMILES:", 1)[-1].strip().replace(" ", "")
 
-            if not raw_smiles:
-                continue
+            if smiles:  # Only check if not empty
+                raw_smiles.append(smiles)
 
-            fixed = repair_smiles(raw_smiles)
-
-            if fixed:
-                repaired_smiles.append(fixed)
-            else:
-                logger.warning(f"❌ Discarded invalid SMILES: {raw_smiles}")
-
-        # Deduplicate + limit
-        return list(dict.fromkeys(repaired_smiles))[:num_candidates]
+        # Deduplicate + limit (NO validation/repair)
+        return list(dict.fromkeys(raw_smiles))[:num_candidates]
 
     # =========================
-    # DRUG POTENTIAL PREDICTION
+    # DRUG POTENTIAL PREDICTION (WITH VALIDATION)
     # =========================
     def predict_drug_potential(self, smiles: str) -> dict:
+        """
+        Predict drug potential for a SMILES string.
+        Validates and repairs SMILES before prediction.
+        """
         try:
-            # 🔒 Final SMILES safety check
+            # Step 1: Validate and repair SMILES
             fixed_smiles = repair_smiles(smiles)
 
             if fixed_smiles is None:
@@ -179,27 +180,30 @@ class ModelInference:
                     "score": 0.0,
                     "is_promising": False,
                     "confidence": "low",
-                    "error": "Invalid SMILES after repair"
+                    "error": "Invalid SMILES - could not be repaired",
+                    "original_smiles": smiles,
+                    "repaired_smiles": None
                 }
 
-            # Step 1: Feature extraction
+            # Step 2: Feature extraction
             features = smiles_to_features(fixed_smiles)
             feature_status = "ok"
 
             if features is None:
                 features = np.zeros(self.expected_feature_dim, dtype=np.float32)
                 feature_status = "fallback"
+                logger.warning(f"Using fallback features for: {fixed_smiles}")
 
             features_tensor = torch.tensor(
                 features, dtype=torch.float32
             ).unsqueeze(0)
 
-            # Step 2: QML inference
+            # Step 3: QML inference
             with torch.no_grad():
                 logit = self.qml_model(features_tensor)
                 probability = torch.sigmoid(logit).item()
 
-            # Step 3: Decision
+            # Step 4: Decision
             is_promising = probability >= 0.5
             confidence_score = abs(probability - 0.5)
 
@@ -215,7 +219,9 @@ class ModelInference:
                 "score": round(probability, 4),
                 "is_promising": is_promising,
                 "confidence": confidence,
-                "feature_status": feature_status
+                "feature_status": feature_status,
+                "original_smiles": smiles,
+                "repaired_smiles": fixed_smiles if fixed_smiles != smiles else None
             }
 
         except Exception as e:
@@ -226,5 +232,7 @@ class ModelInference:
                 "score": 0.5,
                 "is_promising": False,
                 "confidence": "low",
-                "error": str(e)
+                "error": str(e),
+                "original_smiles": smiles,
+                "repaired_smiles": None
             }

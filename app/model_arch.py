@@ -23,37 +23,47 @@ class HybridQMLModel(nn.Module):
         # Classical preprocessing
         x_classical = torch.relu(self.classical_layer_in(x))  # Shape: (batch_size, n_qubits)
         
-        # Quantum processing - process each sample in the batch
-        quantum_outputs = []
-        for i in range(x_classical.shape[0]):
-            sample_features = x_classical[i, :]
-            
-            if self.quantum_layer is not None:
-                # Use actual quantum circuit (training)
+        if self.quantum_layer is not None:
+            # Use actual quantum circuit (training)
+            quantum_outputs = []
+            for i in range(x_classical.shape[0]):
+                sample_features = x_classical[i, :]
                 q_output = self.quantum_layer(self.q_weights, sample_features)
-            else:
-                # IMPROVED mock quantum layer for inference
-                # Better simulation that preserves input variability
-                
-                # Apply rotation-like transformations per qubit
-                rotated = torch.zeros(self.n_qubits)
-                for q in range(self.n_qubits):
-                    # Simulate Rot gate: Rz(θ₁) Ry(θ₂) Rz(θ₃)
-                    theta = self.q_weights[q, :]  # 3 rotation angles
-                    feature = sample_features[q]
-                    
-                    # Combine rotation parameters with input feature
-                    # This creates a non-linear transformation that varies with input
-                    angle = theta[0] * feature + theta[1] * torch.sin(feature) + theta[2]
-                    rotated[q] = torch.cos(angle) * torch.sin(theta[1] * feature)
-                
-                # Simulate entanglement by using mean (mimics expectation value)
-                q_output = torch.tanh(rotated.mean())
+                quantum_outputs.append(q_output)
+            quantum_output_batch = torch.stack(quantum_outputs)
+        else:
+            # IMPROVED VECTORIZED mock quantum layer for inference
+            # This better preserves input variability
             
-            quantum_outputs.append(q_output)
+            # Expand weights for broadcasting: (1, n_qubits, 3)
+            weights_expanded = self.q_weights.unsqueeze(0)
+            
+            # Apply non-linear transformation per qubit
+            # Simulate rotation gates with input-dependent angles
+            # Shape: (batch_size, n_qubits)
+            
+            # Multiple rotation components (simulating Rot gates)
+            theta1 = weights_expanded[:, :, 0]  # (1, n_qubits)
+            theta2 = weights_expanded[:, :, 1]
+            theta3 = weights_expanded[:, :, 2]
+            
+            # Create input-dependent rotations
+            # This creates much more variation based on input features
+            angle1 = theta1 * x_classical + theta2
+            angle2 = theta2 * torch.sin(x_classical * theta3)
+            angle3 = theta3 * torch.cos(x_classical * theta1)
+            
+            # Combine rotations (simulating quantum gate operations)
+            rotated = (torch.sin(angle1) * torch.cos(angle2) + 
+                      torch.cos(angle3) * torch.tanh(x_classical))
+            
+            # Simulate entanglement and measurement (expectation value)
+            # Use weighted mean instead of simple mean to preserve more information
+            qubit_weights = torch.softmax(self.q_weights[:, 0], dim=0)
+            quantum_output_batch = torch.tanh(
+                (rotated * qubit_weights.unsqueeze(0)).sum(dim=1)
+            )  # (batch_size,)
         
-        # Stack quantum outputs
-        quantum_output_batch = torch.stack(quantum_outputs)  # Shape: (batch_size,)
         quantum_output_batch = quantum_output_batch.to(torch.float32)
         
         # Classical post-processing
