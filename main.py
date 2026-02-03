@@ -168,49 +168,57 @@ async def generate_molecules_api(request: GenerateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 def smiles_to_3d_sdf(smiles: str) -> str | None:
+    """
+    Convert SMILES to 3D SDF format with robust error handling.
+    
+    Args:
+        smiles: SMILES string
+        
+    Returns:
+        SDF string or None if generation fails
+    """
     try:
-        # 1️⃣ Parse WITHOUT sanitization
-        mol = Chem.MolFromSmiles(smiles, sanitize=False)
+        # 1️⃣ Parse SMILES with full sanitization first (standard approach)
+        mol = Chem.MolFromSmiles(smiles)
         if mol is None:
+            logger.warning(f"Invalid SMILES, cannot parse: {smiles}")
             return None
 
-        # 2️⃣ Try sanitization in controlled way
+        # 2️⃣ Add hydrogens
         try:
-            Chem.SanitizeMol(
-                mol,
-                sanitizeOps=Chem.SANITIZE_ALL ^ Chem.SANITIZE_AROMATICITY
-            )
-            Chem.Kekulize(mol, clearAromaticFlags=True)
-
+            mol = Chem.AddHs(mol)
         except Exception as e:
-            logger.warning(f"Sanitization issue (continuing): {e}")
+            logger.error(f"Failed to add hydrogens: {e}")
+            return None
 
-        # 3️⃣ Add hydrogens
-        mol = Chem.AddHs(mol)
-
-        # 4️⃣ Embed 3D (robust settings)
+        # 3️⃣ Generate 3D coordinates with robust settings
         params = AllChem.ETKDGv3()
         params.randomSeed = 42
         params.useRandomCoords = True
+        params.maxAttempts = 5  # Try multiple times
 
         result = AllChem.EmbedMolecule(mol, params)
-        if result != 0:
-            logger.warning("ETKDG failed, retrying with basic embedding")
-            result = AllChem.EmbedMolecule(mol)
         
         if result != 0:
-            logger.error("3D embedding failed completely")
+            logger.warning("ETKDG failed, retrying with basic embedding")
+            result = AllChem.EmbedMolecule(mol, AllChem.ETKDG())
+        
+        if result != 0:
+            logger.error(f"3D embedding failed for SMILES: {smiles}")
             return None
 
+        # 4️⃣ Optimize geometry
+        try:
+            AllChem.UFFOptimizeMolecule(mol, maxIters=200)
+        except Exception as e:
+            logger.warning(f"UFF optimization failed (continuing anyway): {e}")
 
-        # 5️⃣ Optimize geometry
-        AllChem.UFFOptimizeMolecule(mol, maxIters=200)
-
-        # 6️⃣ Return SDF
-        return Chem.MolToMolBlock(mol)
+        # 5️⃣ Generate SDF
+        sdf = Chem.MolToMolBlock(mol)
+        return sdf
 
     except Exception as e:
-        logger.error(f"3D generation failed completely: {e}", exc_info=True)
+        logger.error(f"3D generation failed for SMILES '{smiles}': {e}", exc_info=True)
         return None
 
 
