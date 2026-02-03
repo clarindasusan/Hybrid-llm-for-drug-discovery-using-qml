@@ -168,24 +168,51 @@ async def generate_molecules_api(request: GenerateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 def smiles_to_3d_sdf(smiles: str) -> str | None:
-    """
-    Convert SMILES → optimized 3D SDF using RDKit
-    """
     try:
-        mol = Chem.MolFromSmiles(smiles)
+        # 1️⃣ Parse WITHOUT sanitization
+        mol = Chem.MolFromSmiles(smiles, sanitize=False)
         if mol is None:
             return None
 
+        # 2️⃣ Try sanitization in controlled way
+        try:
+            Chem.SanitizeMol(
+                mol,
+                sanitizeOps=Chem.SANITIZE_ALL ^ Chem.SANITIZE_AROMATICITY
+            )
+            Chem.Kekulize(mol, clearAromaticFlags=True)
+
+        except Exception as e:
+            logger.warning(f"Sanitization issue (continuing): {e}")
+
+        # 3️⃣ Add hydrogens
         mol = Chem.AddHs(mol)
 
-        # Generate 3D coordinates
-        AllChem.EmbedMolecule(mol, AllChem.ETKDG())
-        AllChem.UFFOptimizeMolecule(mol)
+        # 4️⃣ Embed 3D (robust settings)
+        params = AllChem.ETKDGv3()
+        params.randomSeed = 42
+        params.useRandomCoords = True
 
+        result = AllChem.EmbedMolecule(mol, params)
+        if result != 0:
+            logger.warning("ETKDG failed, retrying with basic embedding")
+            result = AllChem.EmbedMolecule(mol)
+        
+        if result != 0:
+            logger.error("3D embedding failed completely")
+            return None
+
+
+        # 5️⃣ Optimize geometry
+        AllChem.UFFOptimizeMolecule(mol, maxIters=200)
+
+        # 6️⃣ Return SDF
         return Chem.MolToMolBlock(mol)
+
     except Exception as e:
-        logger.error(f"3D generation failed: {e}")
+        logger.error(f"3D generation failed completely: {e}", exc_info=True)
         return None
+
 
 @app.post("/predict", response_model=PredictResponse, tags=["Prediction"])
 async def predict_drug_potential(request: PredictRequest):
@@ -231,6 +258,9 @@ async def predict_drug_potential(request: PredictRequest):
         # 🔥 GENERATE 3D STRUCTURE
         sdf_3d = smiles_to_3d_sdf(render_smiles)
 
+        if sdf_3d is None:
+            logger.warning(f"3D generation failed for SMILES: {render_smiles}")
+
         return PredictResponse(
             smiles=render_smiles,
             score=prediction["score"],
@@ -240,6 +270,8 @@ async def predict_drug_potential(request: PredictRequest):
             repaired_smiles=prediction.get("repaired_smiles"),
             sdf=sdf_3d
         )
+     
+
 
     except Exception as e:
         logger.error(f"Error in predict_drug_potential: {str(e)}", exc_info=True)
