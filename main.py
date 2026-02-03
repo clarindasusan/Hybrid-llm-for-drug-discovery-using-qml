@@ -9,6 +9,10 @@ from datetime import datetime
 import sys
 from pathlib import Path
 
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
+
 # Add app directory to path
 sys.path.append(str(Path(__file__).parent))
 
@@ -66,7 +70,9 @@ class PredictResponse(BaseModel):
     confidence: str
     original_smiles: Optional[str] = None
     repaired_smiles: Optional[str] = None
+    sdf: Optional[str] = None
     error: Optional[str] = None
+    
 
 # Global model instance
 model_inference = None
@@ -161,43 +167,49 @@ async def generate_molecules_api(request: GenerateRequest):
         logger.error(f"Error generating molecules: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-# ========================================
-# PREDICTION ENDPOINT (WITH VALIDATION)
-# ========================================
+def smiles_to_3d_sdf(smiles: str) -> str | None:
+    """
+    Convert SMILES → optimized 3D SDF using RDKit
+    """
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+
+        mol = Chem.AddHs(mol)
+
+        # Generate 3D coordinates
+        AllChem.EmbedMolecule(mol, AllChem.ETKDG())
+        AllChem.UFFOptimizeMolecule(mol)
+
+        return Chem.MolToMolBlock(mol)
+    except Exception as e:
+        logger.error(f"3D generation failed: {e}")
+        return None
 
 @app.post("/predict", response_model=PredictResponse, tags=["Prediction"])
 async def predict_drug_potential(request: PredictRequest):
-    """
-    Predict drug potential for a given molecule.
-    
-    **Automatic validation and repair**: The API will attempt to validate and repair
-    invalid SMILES strings before prediction. If repair is successful, both original
-    and repaired SMILES will be returned.
-    
-    - **smiles**: SMILES string representation of the molecule
-    
-    Returns probability score, classification, confidence level, and repair info.
-    """
+
     if model_inference is None:
         raise HTTPException(
-            status_code=503, 
+            status_code=503,
             detail="Models not loaded. Please try again in a moment."
         )
-    
+
     try:
         logger.info(f"Predicting for SMILES: {request.smiles}")
-        
-        # Run in executor to avoid blocking
+
         loop = asyncio.get_event_loop()
+
+        # 🔥 RUN MODEL (THIS WAS MISSING)
         prediction = await loop.run_in_executor(
             executor,
             model_inference.predict_drug_potential,
             request.smiles
         )
-        
-        # Check for errors
+
+        # 🔥 HANDLE ERROR CASE FIRST
         if "error" in prediction:
-            # Return the error in the response (don't raise exception)
             return PredictResponse(
                 smiles=prediction.get("original_smiles", request.smiles),
                 score=prediction.get("score", 0.0),
@@ -205,23 +217,34 @@ async def predict_drug_potential(request: PredictRequest):
                 confidence=prediction.get("confidence", "low"),
                 original_smiles=prediction.get("original_smiles"),
                 repaired_smiles=prediction.get("repaired_smiles"),
-                error=prediction.get("error")
+                error=prediction.get("error"),
+                sdf=None
             )
-        
+
+        # 🔥 CHOOSE FINAL SMILES FOR 3D
+        render_smiles = (
+            prediction.get("repaired_smiles")
+            or prediction.get("original_smiles")
+            or request.smiles
+        )
+
+        # 🔥 GENERATE 3D STRUCTURE
+        sdf_3d = smiles_to_3d_sdf(render_smiles)
+
         return PredictResponse(
-            smiles=prediction.get("repaired_smiles") or prediction.get("original_smiles") or request.smiles,
+            smiles=render_smiles,
             score=prediction["score"],
             is_promising=prediction["is_promising"],
             confidence=prediction["confidence"],
-            original_smiles=prediction.get("original_smiles") if prediction.get("repaired_smiles") else None,
-            repaired_smiles=prediction.get("repaired_smiles")
+            original_smiles=prediction.get("original_smiles"),
+            repaired_smiles=prediction.get("repaired_smiles"),
+            sdf=sdf_3d
         )
-        
-    except HTTPException:
-        raise
+
     except Exception as e:
         logger.error(f"Error in predict_drug_potential: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # ========================================
 # EXAMPLES ENDPOINT
