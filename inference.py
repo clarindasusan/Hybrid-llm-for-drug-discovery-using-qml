@@ -87,7 +87,11 @@ class ModelInference:
             if not QML_MODEL_PATH.exists():
                 raise FileNotFoundError(f"QML model not found: {QML_MODEL_PATH}")
 
-            checkpoint = torch.load(QML_MODEL_PATH, map_location="cpu")
+            # This .pth contains numpy arrays (pca_components, scaler_mean etc.)
+            # saved alongside the model weights. PyTorch 2.6 changed weights_only
+            # default to True, which blocks numpy deserialization.
+            # weights_only=False is safe here — this is our own trusted checkpoint.
+            checkpoint = torch.load(QML_MODEL_PATH, map_location="cpu", weights_only=False)
 
             # ── Read architecture metadata saved inside the .pth ──────────
             n_qubits    = checkpoint.get("n_qubits",    8)
