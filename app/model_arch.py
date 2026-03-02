@@ -1,71 +1,66 @@
 import torch
 import torch.nn as nn
 
+
 class HybridQMLModel(nn.Module):
-    def __init__(self, n_features: int, n_qubits: int, quantum_layer=None):
+    def __init__(self, n_qubits: int = 8, n_layers: int = 3, feature_dim: int = 64, quantum_layer=None):
         super().__init__()
-        
+
         self.n_qubits = n_qubits
-        
-        # Classical → Quantum embedding
-        self.classical_layer_in = nn.Linear(n_features, n_qubits)
-        
-        # Quantum layer weights (for Rot gates: 3 parameters per qubit)
-        self.q_weights = nn.Parameter(torch.randn(n_qubits, 3))
-        
-        # Quantum → Classical output (1 expectation value → 1 prediction)
-        self.classical_layer_out = nn.Linear(1, 1)
-        
-        # Store quantum layer if provided (for training)
+        self.n_layers = n_layers
+        self.feature_dim = feature_dim
+
+        # Classical encoder: PCA-reduced features → qubit angles
+        self.pre = nn.Sequential(
+            nn.Linear(feature_dim, 64),   # pre.0
+            nn.ReLU(),                     # pre.1  (no weights, not in state_dict)
+            nn.Linear(64, n_qubits),       # pre.2
+            nn.Tanh(),                     # pre.3  (no weights, not in state_dict)
+        )
+
+        # Quantum variational weights: (n_layers, n_qubits, 3) for StronglyEntanglingLayers
+        self.q_weights = nn.Parameter(torch.randn(n_layers, n_qubits, 3) * 0.1)
+
+        # Quantum layer (PennyLane QNode — only used during training)
         self.quantum_layer = quantum_layer
 
+        # Classical decoder: n_qubits expectation values → 1 logit
+        self.post = nn.Linear(n_qubits, 1)
+
     def forward(self, x):
-        # Classical preprocessing
-        x_classical = torch.relu(self.classical_layer_in(x))  # Shape: (batch_size, n_qubits)
-        
+        # x shape: (batch_size, feature_dim)
+
+        # Classical pre-processing → qubit rotation angles in (-π, π)
+        x_encoded = self.pre(x) * torch.pi   # (batch_size, n_qubits)
+
         if self.quantum_layer is not None:
-            # Use actual quantum circuit (training)
+            # ── Training path: real quantum circuit ──────────────────────
             quantum_outputs = []
-            for i in range(x_classical.shape[0]):
-                sample_features = x_classical[i, :]
-                q_output = self.quantum_layer(self.q_weights, sample_features)
-                quantum_outputs.append(q_output)
-            quantum_output_batch = torch.stack(quantum_outputs)
+            for i in range(x_encoded.shape[0]):
+                q_out = self.quantum_layer(self.q_weights, x_encoded[i])
+                quantum_outputs.append(torch.stack(q_out))   # (n_qubits,)
+            q_batch = torch.stack(quantum_outputs).float()    # (batch_size, n_qubits)
         else:
-            # IMPROVED VECTORIZED mock quantum layer for inference
-            # This better preserves input variability
-            
-            # Expand weights for broadcasting: (1, n_qubits, 3)
-            weights_expanded = self.q_weights.unsqueeze(0)
-            
-            # Apply non-linear transformation per qubit
-            # Simulate rotation gates with input-dependent angles
-            # Shape: (batch_size, n_qubits)
-            
-            # Multiple rotation components (simulating Rot gates)
-            theta1 = weights_expanded[:, :, 0]  # (1, n_qubits)
-            theta2 = weights_expanded[:, :, 1]
-            theta3 = weights_expanded[:, :, 2]
-            
-            # Create input-dependent rotations
-            # This creates much more variation based on input features
-            angle1 = theta1 * x_classical + theta2
-            angle2 = theta2 * torch.sin(x_classical * theta3)
-            angle3 = theta3 * torch.cos(x_classical * theta1)
-            
-            # Combine rotations (simulating quantum gate operations)
-            rotated = (torch.sin(angle1) * torch.cos(angle2) + 
-                      torch.cos(angle3) * torch.tanh(x_classical))
-            
-            # Simulate entanglement and measurement (expectation value)
-            # Use weighted mean instead of simple mean to preserve more information
-            qubit_weights = torch.softmax(self.q_weights[:, 0], dim=0)
-            quantum_output_batch = torch.tanh(
-                (rotated * qubit_weights.unsqueeze(0)).sum(dim=1)
-            )  # (batch_size,)
-        
-        quantum_output_batch = quantum_output_batch.to(torch.float32)
-        
-        # Classical post-processing
-        output = self.classical_layer_out(quantum_output_batch.unsqueeze(1))  # Shape: (batch_size, 1)
-        return output
+            # ── Inference path: mock StronglyEntanglingLayers ────────────
+            # Simulates data re-uploading across n_layers with entanglement
+            batch_size = x_encoded.shape[0]
+
+            # Initialise qubit state as input angles
+            state = x_encoded                                 # (batch_size, n_qubits)
+
+            for layer in range(self.n_layers):
+                w = self.q_weights[layer]                     # (n_qubits, 3)
+                # Simulate Rot gates: RZ(w2) RY(w1) RZ(w0)
+                rx = torch.sin(state * w[:, 0] + w[:, 1])
+                ry = torch.cos(state * w[:, 1] + w[:, 2])
+                rz = torch.tanh(state * w[:, 2] + w[:, 0])
+                rotated = (rx + ry + rz) / 3.0               # (batch_size, n_qubits)
+                # Simulate CNOT entanglement: each qubit mixes with neighbour
+                shifted = torch.roll(rotated, 1, dims=1)
+                state = torch.tanh(rotated + 0.5 * shifted)  # (batch_size, n_qubits)
+
+            q_batch = state                                   # (batch_size, n_qubits)
+
+        # Classical post-processing → logit
+        out = self.post(q_batch)    # (batch_size, 1)
+        return out
