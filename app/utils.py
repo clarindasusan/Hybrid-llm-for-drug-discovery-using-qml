@@ -94,12 +94,13 @@ def smiles_to_features(
         ], dtype=np.float32)
 
         normalized = np.zeros_like(descriptors)
-        '''
+        
         for i in range(len(descriptors)):
             min_val, max_val = descriptor_ranges[i]
             normalized[i] = (descriptors[i] - min_val) / (max_val - min_val)
             normalized[i] = np.clip(normalized[i], 0.0, 1.0)
 
+        '''
         # STEP 5: Combine fingerprint + descriptors
         features = np.concatenate([fp_array, descriptors])
 
