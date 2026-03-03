@@ -25,7 +25,7 @@ class HybridQMLModel(nn.Module):
         self.quantum_layer = quantum_layer
 
         # Classical decoder: n_qubits expectation values → 1 logit
-        self.post = nn.Linear(n_qubits, 1)
+        self.post = nn.Linear(1, 1)
 
     def forward(self, x):
         # x shape: (batch_size, feature_dim)
@@ -34,33 +34,15 @@ class HybridQMLModel(nn.Module):
         x_encoded = self.pre(x) * torch.pi   # (batch_size, n_qubits)
 
         if self.quantum_layer is not None:
-            # ── Training path: real quantum circuit ──────────────────────
             quantum_outputs = []
             for i in range(x_encoded.shape[0]):
                 q_out = self.quantum_layer(self.q_weights, x_encoded[i])
-                quantum_outputs.append(torch.stack(q_out))   # (n_qubits,)
-            q_batch = torch.stack(quantum_outputs).float()    # (batch_size, n_qubits)
+                quantum_outputs.append(q_out)
+            q_batch = torch.stack(quantum_outputs).float()  # (batch,)
         else:
-            # ── Inference path: mock StronglyEntanglingLayers ────────────
-            # Simulates data re-uploading across n_layers with entanglement
-            batch_size = x_encoded.shape[0]
-
-            # Initialise qubit state as input angles
-            state = x_encoded                                 # (batch_size, n_qubits)
-
-            for layer in range(self.n_layers):
-                w = self.q_weights[layer]                     # (n_qubits, 3)
-                # Simulate Rot gates: RZ(w2) RY(w1) RZ(w0)
-                rx = torch.sin(state * w[:, 0] + w[:, 1])
-                ry = torch.cos(state * w[:, 1] + w[:, 2])
-                rz = torch.tanh(state * w[:, 2] + w[:, 0])
-                rotated = (rx + ry + rz) / 3.0               # (batch_size, n_qubits)
-                # Simulate CNOT entanglement: each qubit mixes with neighbour
-                shifted = torch.roll(rotated, 1, dims=1)
-                state = torch.tanh(rotated + 0.5 * shifted)  # (batch_size, n_qubits)
-
-            q_batch = state                                   # (batch_size, n_qubits)
+            # Mock: produce single scalar per sample
+            q_batch = torch.mean(x_encoded, dim=1)  # (batch,)                                   # (batch_size, n_qubits)
 
         # Classical post-processing → logit
-        out = self.post(q_batch)    # (batch_size, 1)
+        out = self.post(q_batch.unsqueeze(1))    # (batch_size, 1)
         return out
