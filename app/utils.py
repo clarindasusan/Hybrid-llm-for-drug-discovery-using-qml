@@ -99,11 +99,13 @@ def smiles_to_features(
            features = np.pad(features,(0, n_features - features.shape[0]), mode="constant")
        elif features.shape[0] > n_features:
            features = features[:n_features]
+           """
            return features.astype(np.float32)
+           
     except Exception:
         logger.exception("Unexpected SMILES feature failure")
         return None
-        """
+        
 
 
 def validate_smiles(smiles: str) -> bool:
