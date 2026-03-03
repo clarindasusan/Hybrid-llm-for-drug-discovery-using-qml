@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 def smiles_to_features(
     smiles: str,
-    n_bits: int = 2048,
-    n_features: int = 2053
+    n_bits: int = 1024,
+    n_features: int = 1036
 ) -> np.ndarray | None:
     """
     Convert SMILES string to molecular feature vector.
@@ -93,7 +93,7 @@ def smiles_to_features(
         features = np.concatenate([fp_array, normalized])
 
         # --- STEP 6: Enforce fixed size ---
-        if features.shape[0] < n_features:
+       ''' if features.shape[0] < n_features:
             features = np.pad(
                 features,
                 (0, n_features - features.shape[0]),
@@ -103,7 +103,7 @@ def smiles_to_features(
             features = features[:n_features]
 
         return features.astype(np.float32)
-
+'''
     except Exception:
         logger.exception("Unexpected SMILES feature failure")
         return None
