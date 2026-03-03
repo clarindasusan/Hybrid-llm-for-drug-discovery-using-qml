@@ -123,6 +123,8 @@ class ModelInference:
             self.qml_model.eval()
 
             logger.info("✅ QML model loaded")
+            logger.info(f"Scaler mean shape: {self.scaler_mean.shape}")
+            logger.info(f"PCA components shape: {self.pca_components.shape}")
 
         except Exception:
             logger.error("❌ Failed to load QML model", exc_info=True)
