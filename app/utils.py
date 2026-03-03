@@ -74,9 +74,17 @@ def smiles_to_features(
             safe_descriptor(Descriptors.NumHDonors),
             safe_descriptor(Descriptors.NumHAcceptors),
             safe_descriptor(Descriptors.TPSA),
+            safe_descriptor(Descriptors.NumRotatableBonds),
+            safe_descriptor(Descriptors.RingCount),
+            safe_descriptor(Descriptors.HeavyAtomCount),
+            safe_descriptor(Descriptors.NHOHCount),
+            safe_descriptor(Descriptors.NOCount),
+            safe_descriptor(Descriptors.FractionCSP3),
+            safe_descriptor(Descriptors.NumValenceElectrons),
         ], dtype=np.float32)
 
         # STEP 4: Normalize descriptors
+        '''
         descriptor_ranges = np.array([
             [0, 1000],    # MolWt
             [-5, 10],     # LogP
@@ -86,13 +94,14 @@ def smiles_to_features(
         ], dtype=np.float32)
 
         normalized = np.zeros_like(descriptors)
+        '''
         for i in range(len(descriptors)):
             min_val, max_val = descriptor_ranges[i]
             normalized[i] = (descriptors[i] - min_val) / (max_val - min_val)
             normalized[i] = np.clip(normalized[i], 0.0, 1.0)
 
         # STEP 5: Combine fingerprint + descriptors
-        features = np.concatenate([fp_array, normalized])
+        features = np.concatenate([fp_array, descriptors])
 
         return features.astype(np.float32)
 
