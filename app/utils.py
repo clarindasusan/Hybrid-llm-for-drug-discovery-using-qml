@@ -17,7 +17,11 @@ os.environ["TRANSFORMERS_CACHE"] = "D:/hf-cache"
 
 logger = logging.getLogger(__name__)
 
-def smiles_to_features(smiles: str, n_features: int = 2053) -> np.ndarray | None:
+def smiles_to_features(
+    smiles: str,
+    n_bits: int = 2048,
+    n_features: int = 2053
+) -> np.ndarray | None:
     """
     Convert SMILES string to molecular feature vector.
 
@@ -45,7 +49,7 @@ def smiles_to_features(smiles: str, n_features: int = 2053) -> np.ndarray | None
         # --- STEP 2: Fingerprint (fallback to zeros) ---
         try:
             fingerprint = AllChem.GetMorganFingerprintAsBitVect(
-                mol, radius=2, nBits=2048
+                mol, radius=2, nBits=n_bits
             )
             fp_array = np.array(fingerprint, dtype=np.float32)
         except Exception as e:
