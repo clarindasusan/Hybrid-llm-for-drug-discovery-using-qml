@@ -14,7 +14,7 @@ from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors, Crippen, QED
 from rdkit.Chem.FilterCatalog import FilterCatalogParams, FilterCatalog
 from app.utils import repair_smiles 
 from explainer import MoleculeExplainer
-from app.utils import smiles_to_features, repair_smiles
+
 
 sys.path.append(str(Path(__file__).parent))
 
@@ -364,7 +364,7 @@ async def startup_event():
 
         # Initialise explainer — background computation happens lazily
         # on first /explain call, not here, to keep startup fast
-        molecule_explainer = MoleculeExplainer(model_inference, smiles_to_features)
+        molecule_explainer = MoleculeExplainer(model_inference)
         logger.info("✓ Explainer ready!")
     except Exception as e:
         logger.error(f"✗ Startup failed: {e}", exc_info=True)
