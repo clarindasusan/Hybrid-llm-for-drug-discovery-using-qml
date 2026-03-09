@@ -12,6 +12,7 @@ from pathlib import Path
 from rdkit import Chem
 from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors, Crippen, QED, FilterCatalog
 from rdkit.Chem.FilterCatalog import FilterCatalogParams
+from utils import repair_smiles 
 
 sys.path.append(str(Path(__file__).parent))
 
@@ -146,36 +147,64 @@ def smiles_to_3d_sdf(smiles: str) -> Optional[str]:
 
 # ── Predict ───────────────────────────────────────────────────────────────────
 
+
+
 @app.post("/predict", response_model=PredictResponse, tags=["Prediction"])
 async def predict_drug_potential(request: PredictRequest):
     if model_inference is None:
-        raise HTTPException(status_code=503, detail="Models not loaded. Please try again in a moment.")
+        raise HTTPException(status_code=503, detail="Models not loaded.")
     try:
-        logger.info(f"Predicting for SMILES: {request.smiles}")
-        loop = asyncio.get_event_loop()
-        prediction = await loop.run_in_executor(executor, model_inference.predict_drug_potential, request.smiles)
-        if "error" in prediction:
+        original_smiles = request.smiles
+
+        # ── Repair SMILES before doing anything else ──
+        repaired = repair_smiles(original_smiles)
+        if repaired is None:
             return PredictResponse(
-                smiles=prediction.get("original_smiles", request.smiles),
-                score=prediction.get("score", 0.0),
-                is_promising=prediction.get("is_promising", False),
-                confidence=prediction.get("confidence", "low"),
-                original_smiles=prediction.get("original_smiles"),
-                repaired_smiles=prediction.get("repaired_smiles"),
-                error=prediction.get("error"),
+                smiles=original_smiles,
+                score=0.0,
+                is_promising=False,
+                confidence="low",
+                original_smiles=original_smiles,
+                repaired_smiles=None,
+                error="SMILES could not be parsed or repaired",
                 sdf=None
             )
-        render_smiles = prediction.get("repaired_smiles") or prediction.get("original_smiles") or request.smiles
+
+        # Use the repaired canonical SMILES from here on
+        smiles_to_use = repaired
+
+        loop = asyncio.get_event_loop()
+        prediction = await loop.run_in_executor(
+            executor,
+            model_inference.predict_drug_potential,
+            smiles_to_use
+        )
+
+        if "error" in prediction:
+            return PredictResponse(
+                smiles=original_smiles,
+                score=prediction.get("score", 0.0),
+                is_promising=False,
+                confidence="low",
+                original_smiles=original_smiles,
+                repaired_smiles=repaired if repaired != original_smiles else None,
+                error=prediction["error"],
+                sdf=None
+            )
+
+        render_smiles = repaired
         sdf_3d = smiles_to_3d_sdf(render_smiles)
+
         return PredictResponse(
             smiles=render_smiles,
             score=prediction["score"],
             is_promising=prediction["is_promising"],
             confidence=prediction["confidence"],
-            original_smiles=prediction.get("original_smiles"),
-            repaired_smiles=prediction.get("repaired_smiles"),
+            original_smiles=original_smiles,
+            repaired_smiles=repaired if repaired != original_smiles else None,
             sdf=sdf_3d
         )
+
     except Exception as e:
         logger.error(f"Error in predict: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
