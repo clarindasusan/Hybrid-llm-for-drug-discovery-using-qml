@@ -212,6 +212,58 @@ class ModelInference:
 
         return list(dict.fromkeys(raw_smiles))[:num_candidates]
 
+    def predict_from_features(self, features: np.ndarray) -> float:
+        
+        
+    """
+    Run the QML model directly on a pre-computed feature vector.
+    Used by SHAP KernelExplainer.
+
+    Args:
+        features: np.ndarray — can be either:
+                  - raw (Morgan fingerprint + descriptors), shape (fingerprint_bits + 12,)
+                  - or already preprocessed (post-scaler + post-PCA), shape (feature_dim,)
+                  This method always runs the full preprocessing pipeline
+                  to be safe, matching what predict_drug_potential does.
+
+    Returns:
+        float: drug-likeness score in [0, 1]
+    """
+        try:
+            features = np.array(features, dtype=np.float32).flatten()
+    
+            feature_dim = (
+                self.pca_components.shape[0]
+                if self.pca_components is not None
+                else 64
+            )
+    
+            # If raw features passed in (not yet scaled/PCA'd), run the pipeline.
+            # If already feature_dim length, use directly.
+            if features.shape[0] != feature_dim:
+                # Run StandardScaler
+                if self.scaler_mean is not None and self.scaler_scale is not None:
+                    scale    = np.where(self.scaler_scale == 0, 1.0, self.scaler_scale)
+                    features = (features - self.scaler_mean) / scale
+    
+                # Run PCA
+                if self.pca_components is not None and self.pca_mean is not None:
+                    features = features - self.pca_mean
+                    features = features @ self.pca_components.T  # (feature_dim,)
+    
+            features = features.astype(np.float32)
+    
+            # Run QML model (same path as predict_drug_potential)
+            x = torch.tensor(features, dtype=torch.float32).unsqueeze(0)  # (1, feature_dim)
+            with torch.no_grad():
+                logit       = self.qml_model(x)
+                probability = torch.sigmoid(logit).item()
+    
+            return float(probability)
+    
+        except Exception as e:
+            logger.warning(f"predict_from_features failed: {e}")
+            return 0.0
     # =========================
     # DRUG POTENTIAL PREDICTION
     # =========================
