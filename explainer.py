@@ -347,21 +347,20 @@ class MoleculeExplainer:
 
     def _predict_from_features(self, feature_matrix: np.ndarray) -> np.ndarray:
         
-        
         feature_matrix = np.array(feature_matrix, dtype=np.float32)
-        scores = []
-        for features in feature_matrix:
-            try:
-                x = torch.tensor(features, dtype=torch.float32).unsqueeze(0)  # (1, feature_dim)
-                with torch.no_grad():
-                    logit = self.model.qml_model(x)
-                    # squeeze() removes ALL extra dimensions — handles (1,1), (1,), and scalar
-                    probability = torch.sigmoid(logit).squeeze().item()
-                scores.append(float(probability))
-            except Exception as e:
-                logger.warning(f"SHAP sample prediction failed: {e}")
-                scores.append(0.5)
-        return np.array(scores, dtype=np.float32)  # must be shape (n_samples,) — flat 1D
+        try:
+            x = torch.tensor(feature_matrix, dtype=torch.float32)  # (n_samples, feature_dim)
+            with torch.no_grad():
+                logits        = self.model.qml_model(x)                      # (n_samples, 1)
+                probabilities = torch.sigmoid(logits).squeeze(-1).flatten()  # force (n_samples,)
+            result = probabilities.numpy().astype(np.float32)
+            # Explicit shape guard — SHAP will crash if this is not 1D
+            if result.ndim != 1:
+                result = result.flatten()
+            return result
+        except Exception as e:
+            logger.warning(f"SHAP batch prediction failed: {e}")
+            return np.full(len(feature_matrix), 0.5, dtype=np.float32)
 
     # ── Internal: background in PCA space ─────────────────────────────────────
 
@@ -502,7 +501,7 @@ class MoleculeExplainer:
         try:
             shap_values = explainer.shap_values(
                 pca_features.reshape(1, -1),
-                nsamples="auto",    # increase for accuracy, decrease for speed
+                nsamples=2 * pca_features.shape[0] + 2048,    # increase for accuracy, decrease for speed
                 silent=True
             )
             # Normalise output shape — can be (1, feature_dim) or (feature_dim,)
