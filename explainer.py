@@ -509,7 +509,7 @@ class MoleculeExplainer:
         try:
             shap_values = explainer.shap_values(
                 pca_features.reshape(1, -1),
-                nsamples=100,    # increase for accuracy, decrease for speed
+                nsamples=auto,    # increase for accuracy, decrease for speed
                 silent=True
             )
             # Normalise output shape — can be (1, feature_dim) or (feature_dim,)
