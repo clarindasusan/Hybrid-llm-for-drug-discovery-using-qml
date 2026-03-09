@@ -212,23 +212,7 @@ class ModelInference:
 
         return list(dict.fromkeys(raw_smiles))[:num_candidates]
 
-    def predict_from_features(self, features: np.ndarray) -> float:
-        
-        
-    """
-    Run the QML model directly on a pre-computed feature vector.
-    Used by SHAP KernelExplainer.
-
-    Args:
-        features: np.ndarray — can be either:
-                  - raw (Morgan fingerprint + descriptors), shape (fingerprint_bits + 12,)
-                  - or already preprocessed (post-scaler + post-PCA), shape (feature_dim,)
-                  This method always runs the full preprocessing pipeline
-                  to be safe, matching what predict_drug_potential does.
-
-    Returns:
-        float: drug-likeness score in [0, 1]
-    """
+    def predict_from_features(self, features: np.ndarray) -> float:    
         try:
             features = np.array(features, dtype=np.float32).flatten()
     
