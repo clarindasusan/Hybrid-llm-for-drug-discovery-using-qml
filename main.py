@@ -13,6 +13,8 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors, Crippen, QED
 from rdkit.Chem.FilterCatalog import FilterCatalogParams, FilterCatalog
 from app.utils import repair_smiles 
+from explainer import MoleculeExplainer
+from app.utils import smiles_to_features, repair_smiles
 
 sys.path.append(str(Path(__file__).parent))
 
@@ -344,6 +346,166 @@ async def compute_admet(request: ADMETRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
+
+
+
+# ── 2. New global variable (alongside model_inference = None) ─────────────────
+molecule_explainer = None
+
+# ── 3. Update startup_event to initialise the explainer ──────────────────────
+@app.on_event("startup")
+async def startup_event():
+    global model_inference, molecule_explainer
+    try:
+        logger.info("Loading models...")
+        model_inference = ModelInference()
+        logger.info("✓ Models loaded successfully!")
+
+        # Initialise explainer — background computation happens lazily
+        # on first /explain call, not here, to keep startup fast
+        molecule_explainer = MoleculeExplainer(model_inference, smiles_to_features)
+        logger.info("✓ Explainer ready!")
+    except Exception as e:
+        logger.error(f"✗ Startup failed: {e}", exc_info=True)
+
+
+# ── 4. New Pydantic models ────────────────────────────────────────────────────
+
+class ExplainRequest(BaseModel):
+    smiles: str = Field(..., description="SMILES string to explain")
+    include_admet: bool = Field(
+        True, description="Compute ADMET data to enrich the explanation text"
+    )
+
+class DescriptorContribution(BaseModel):
+    name:      str
+    label:     str
+    unit:      str
+    ideal:     str
+    value:     float
+    shap:      float
+    direction: str   # 'positive' | 'negative' | 'neutral'
+    magnitude: float
+
+class FingerprintContribution(BaseModel):
+    bit:       int
+    shap:      float
+    direction: str
+    atoms:     List[int]
+    present:   bool
+
+class ExplainResponse(BaseModel):
+    smiles:                    str
+    original_smiles:           Optional[str]
+    repaired_smiles:           Optional[str]
+    score:                     float
+    shap_base_value:           float
+    descriptor_contributions:  List[DescriptorContribution]
+    fingerprint_contributions: List[FingerprintContribution]
+    important_atoms:           List[int]
+    explanation_text:          str
+    confidence:                str
+    error:                     Optional[str] = None
+
+
+# ── 5. The /explain endpoint ──────────────────────────────────────────────────
+
+@app.post("/explain", response_model=ExplainResponse, tags=["Explanation"])
+async def explain_prediction(request: ExplainRequest):
+    """
+    Explain a drug-likeness prediction using SHAP (SHapley Additive exPlanations).
+
+    Returns:
+    - **descriptor_contributions**: how each RDKit descriptor pushed the score up/down
+    - **fingerprint_contributions**: which Morgan fingerprint bits mattered most
+    - **important_atoms**: atom indices to highlight in the 3D viewer
+    - **explanation_text**: plain-English summary of the prediction
+    - **confidence**: high / medium / low based on SHAP value spread
+
+    The QML model is treated as a black box — SHAP perturbs the input features
+    and measures how the output changes, giving model-agnostic explanations.
+    """
+    if molecule_explainer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Explainer not initialised. Models may still be loading."
+        )
+
+    original_smiles = request.smiles
+
+    # ── Repair SMILES ─────────────────────────────────────────────────────────
+    repaired = repair_smiles(original_smiles)
+    if repaired is None:
+        return ExplainResponse(
+            smiles=original_smiles,
+            original_smiles=original_smiles,
+            repaired_smiles=None,
+            score=0.0,
+            shap_base_value=0.0,
+            descriptor_contributions=[],
+            fingerprint_contributions=[],
+            important_atoms=[],
+            explanation_text="Could not parse or repair the SMILES string.",
+            confidence="low",
+            error="SMILES could not be parsed or repaired",
+        )
+
+    smiles_to_use   = repaired
+    repaired_field  = repaired if repaired != original_smiles else None
+
+    # ── Optionally compute ADMET for richer explanation text ─────────────────
+    admet_data = None
+    if request.include_admet:
+        try:
+            admet_data = _compute_admet(smiles_to_use)
+            if admet_data.get("error"):
+                admet_data = None
+        except Exception:
+            admet_data = None
+
+    # ── Run SHAP explanation (CPU-bound → thread pool) ────────────────────────
+    try:
+        loop   = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            executor,
+            lambda: molecule_explainer.explain(smiles_to_use, admet_data)
+        )
+    except Exception as e:
+        logger.error(f"Explanation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if "error" in result and result["error"]:
+        return ExplainResponse(
+            smiles=smiles_to_use,
+            original_smiles=original_smiles,
+            repaired_smiles=repaired_field,
+            score=0.0,
+            shap_base_value=0.0,
+            descriptor_contributions=[],
+            fingerprint_contributions=[],
+            important_atoms=[],
+            explanation_text=result["error"],
+            confidence="low",
+            error=result["error"],
+        )
+
+    return ExplainResponse(
+        smiles=smiles_to_use,
+        original_smiles=original_smiles,
+        repaired_smiles=repaired_field,
+        score=result["score"],
+        shap_base_value=result["shap_base_value"],
+        descriptor_contributions=[
+            DescriptorContribution(**d) for d in result["descriptor_contributions"]
+        ],
+        fingerprint_contributions=[
+            FingerprintContribution(**f) for f in result["fingerprint_contributions"]
+        ],
+        important_atoms=result["important_atoms"],
+        explanation_text=result["explanation_text"],
+        confidence=result["confidence"],
+    )
 # ── Examples ──────────────────────────────────────────────────────────────────
 
 @app.get("/examples", tags=["Examples"])
