@@ -49,7 +49,7 @@ DESCRIPTOR_META = [
 ]
 
 N_DESCRIPTORS = 12   # must match utils.py
-N_BACKGROUND  = 20   # number of background molecules for SHAP
+N_BACKGROUND  = 10   # number of background molecules for SHAP
 N_TOP_BITS    = 10   # how many fingerprint bits to report in fingerprint tab
 
 
@@ -371,7 +371,7 @@ class MoleculeExplainer:
         (StandardScaler → PCA), matching what the model actually receives.
         """
         features = []
-        for smi in BACKGROUND_SMILES:
+        for smi in BACKGROUND_SMILES[:N_BACKGROUND]:
             try:
                 f = self.model._prepare_features(smi)   # (feature_dim,)
                 if f is not None:
