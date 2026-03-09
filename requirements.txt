@@ -14,3 +14,6 @@ rdkit==2023.9.1
 pennylane==0.33.0
 autoray==0.6.7
 sacremoses==0.0.53
+
+shap
+matplotlib
