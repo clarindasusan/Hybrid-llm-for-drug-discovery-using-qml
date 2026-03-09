@@ -10,9 +10,9 @@ import sys
 from pathlib import Path
 
 from rdkit import Chem
-from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors, Crippen, QED, FilterCatalog
-from rdkit.Chem.FilterCatalog import FilterCatalogParams
-from utils import repair_smiles 
+from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors, Crippen, QED
+from rdkit.Chem.FilterCatalog import FilterCatalogParams, FilterCatalog
+from app.utils import repair_smiles 
 
 sys.path.append(str(Path(__file__).parent))
 
