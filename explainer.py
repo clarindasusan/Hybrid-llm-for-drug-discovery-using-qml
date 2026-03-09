@@ -346,29 +346,22 @@ class MoleculeExplainer:
     # ── Internal: batch prediction for SHAP ───────────────────────────────────
 
     def _predict_from_features(self, feature_matrix: np.ndarray) -> np.ndarray:
-        """
-        Run HybridQMLModel on a batch of PCA-space feature vectors.
-        SHAP calls this many times with perturbed inputs.
-
-        Args:
-            feature_matrix: np.ndarray, shape (n_samples, feature_dim)
-
-        Returns:
-            np.ndarray of scores, shape (n_samples,)
-        """
+        
+        
         feature_matrix = np.array(feature_matrix, dtype=np.float32)
         scores = []
         for features in feature_matrix:
             try:
                 x = torch.tensor(features, dtype=torch.float32).unsqueeze(0)  # (1, feature_dim)
                 with torch.no_grad():
-                    logit       = self.model.qml_model(x)
-                    probability = torch.sigmoid(logit).item()
+                    logit = self.model.qml_model(x)
+                    # squeeze() removes ALL extra dimensions — handles (1,1), (1,), and scalar
+                    probability = torch.sigmoid(logit).squeeze().item()
                 scores.append(float(probability))
             except Exception as e:
                 logger.warning(f"SHAP sample prediction failed: {e}")
                 scores.append(0.5)
-        return np.array(scores, dtype=np.float32)
+        return np.array(scores, dtype=np.float32)  # must be shape (n_samples,) — flat 1D
 
     # ── Internal: background in PCA space ─────────────────────────────────────
 
