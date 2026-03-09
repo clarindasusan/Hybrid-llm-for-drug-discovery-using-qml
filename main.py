@@ -273,8 +273,8 @@ def _compute_admet(smiles: str) -> dict:
     # PAINS + BRENK for toxicity
     params_p = FilterCatalogParams(); params_p.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS)
     params_b = FilterCatalogParams(); params_b.AddCatalog(FilterCatalogParams.FilterCatalogs.BRENK)
-    cat_p = FilterCatalog.FilterCatalog(params_p)
-    cat_b = FilterCatalog.FilterCatalog(params_b)
+    cat_p = FilterCatalog(params_p)
+    cat_b = FilterCatalog(params_b)
     pains_hits = list(cat_p.GetMatches(mol))
     brenk_hits = list(cat_b.GetMatches(mol))
 
