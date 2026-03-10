@@ -4,6 +4,7 @@ from rdkit.Chem import Descriptors, AllChem
 import logging
 import os
 from dotenv import load_dotenv
+from typing import Optional
 
 # Load .env immediately
 load_dotenv()
