@@ -43,14 +43,6 @@ executor = ThreadPoolExecutor(max_workers=4)
 
 # ── Request / Response Models ─────────────────────────────────────────────────
 
-class GenerateRequest(BaseModel):
-    disease: str = Field(..., description="Name of the disease")
-    num_candidates: int = Field(3, description="Number of molecules to generate", ge=1, le=10)
-
-class GenerateResponse(BaseModel):
-    disease: str
-    molecules: List[str]
-    note: str = "Raw SMILES from generation - not validated"
 
 class PredictRequest(BaseModel):
     smiles: str = Field(..., description="SMILES string of the molecule", example="CCO")
@@ -71,21 +63,8 @@ class ADMETRequest(BaseModel):
 # ── Global model ──────────────────────────────────────────────────────────────
 
 model_inference = None
+molecule_explainer = None
 
-@app.on_event("startup")
-async def startup_event():
-    global model_inference
-    try:
-        logger.info("Loading models...")
-        model_inference = ModelInference()
-        logger.info("✓ Models loaded successfully!")
-    except Exception as e:
-        logger.error(f"✗ Failed to load models: {e}", exc_info=True)
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("Shutting down...")
-    executor.shutdown(wait=True)
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
@@ -109,17 +88,112 @@ async def health():
 
 # ── Generate ──────────────────────────────────────────────────────────────────
 
+# ════════════════════════════════════════════════════════════════════════════════
+# Replace your existing /generate endpoint in main.py with this version.
+# The only change is handling the new list-of-dicts format from generate_molecules()
+# and passing the "source" field through to the frontend.
+# ════════════════════════════════════════════════════════════════════════════════
+
+# ── Updated Pydantic models ───────────────────────────────────────────────────
+
+class GenerateRequest(BaseModel):
+    disease: str = Field(..., description="Disease name to generate candidates for")
+    num_candidates: int = Field(default=3, ge=1, le=10)
+
+class MoleculeCandidate(BaseModel):
+    smiles:          str
+    score:           float
+    is_promising:    bool
+    confidence:      str
+    prediction:      str
+    source:          str            # "generated" | "fallback"
+    original_smiles: Optional[str] = None
+    repaired_smiles: Optional[str] = None
+    error:           Optional[str] = None
+
+class GenerateResponse(BaseModel):
+    disease:    str
+    candidates: List[MoleculeCandidate]
+    generated:  int                 # count of LLM-generated (not fallback)
+    fallback:   int                 # count of curated fallbacks used
+    timestamp:  str
+
+
+# ── Updated /generate endpoint ────────────────────────────────────────────────
+
 @app.post("/generate", response_model=GenerateResponse, tags=["Generation"])
-async def generate_molecules_api(request: GenerateRequest):
+async def generate_drug_candidates(request: GenerateRequest):
+    """
+    Generate drug candidate SMILES for a disease using BioGPT + LoRA,
+    then score each with the QML model.
+
+    Each candidate includes a `source` field:
+    - **generated**: produced by the LLM and validated
+    - **fallback**: from the curated library (used when LLM output is invalid)
+    """
     if model_inference is None:
-        raise HTTPException(status_code=503, detail="Models not loaded. Please try again in a moment.")
+        raise HTTPException(status_code=503, detail="Models not loaded yet")
+
     try:
         loop = asyncio.get_event_loop()
-        molecules = await loop.run_in_executor(executor, model_inference.generate_molecules, request.disease, request.num_candidates)
-        return GenerateResponse(disease=request.disease, molecules=molecules, note="Raw SMILES - use /predict to validate.")
+
+        # generate_molecules now returns list of {"smiles": str, "source": str}
+        molecule_dicts = await loop.run_in_executor(
+            executor,
+            lambda: model_inference.generate_molecules(
+                request.disease,
+                request.num_candidates
+            )
+        )
+
     except Exception as e:
-        logger.error(f"Error generating molecules: {str(e)}", exc_info=True)
+        logger.error(f"Generation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+    # ── Score each candidate ──────────────────────────────────────────────
+    candidates = []
+    for item in molecule_dicts:
+        smiles = item["smiles"]
+        source = item["source"]
+        try:
+            prediction = await loop.run_in_executor(
+                executor,
+                model_inference.predict_drug_potential,
+                smiles
+            )
+            candidates.append(MoleculeCandidate(
+                smiles=smiles,
+                score=prediction.get("score",        0.0),
+                is_promising=prediction.get("is_promising", False),
+                confidence=prediction.get("confidence",   "low"),
+                prediction=prediction.get("prediction",   "unknown"),
+                source=source,
+                original_smiles=prediction.get("original_smiles"),
+                repaired_smiles=prediction.get("repaired_smiles"),
+                error=prediction.get("error"),
+            ))
+        except Exception as e:
+            logger.error(f"Scoring failed for {smiles}: {e}")
+            candidates.append(MoleculeCandidate(
+                smiles=smiles,
+                score=0.0,
+                is_promising=False,
+                confidence="low",
+                prediction="unknown",
+                source=source,
+                error=str(e),
+            ))
+
+    n_generated = sum(1 for c in candidates if c.source == "generated")
+    n_fallback  = sum(1 for c in candidates if c.source == "fallback")
+
+    return GenerateResponse(
+        disease=request.disease,
+        candidates=candidates,
+        generated=n_generated,
+        fallback=n_fallback,
+        timestamp=datetime.utcnow().isoformat(),
+    )
 
 # ── 3D SDF helper ─────────────────────────────────────────────────────────────
 
@@ -351,7 +425,7 @@ async def compute_admet(request: ADMETRequest):
 
 
 # ── 2. New global variable (alongside model_inference = None) ─────────────────
-molecule_explainer = None
+
 
 # ── 3. Update startup_event to initialise the explainer ──────────────────────
 @app.on_event("startup")
