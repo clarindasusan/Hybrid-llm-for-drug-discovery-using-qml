@@ -169,37 +169,55 @@ def fix_brackets(smiles: str) -> str:
 # SMILES REPAIR PIPELINE
 # ==========================================================
 
-def repair_smiles(smiles: str, verbose: bool = False):
-    if not smiles or not smiles.strip():
+def repair_smiles(smiles: str) -> Optional[str]:
+    if not smiles:
         return None
 
-    smiles = smiles.strip()
+    # ── Step 0: Strip trailing punctuation the LLM appends ──────────────
+    smiles = smiles.strip().rstrip('.').rstrip()
 
-    try:
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is not None:
-            return Chem.MolToSmiles(mol, canonical=True)
-    except Exception:
-        pass
+    # ── Step 1: Direct parse ─────────────────────────────────────────────
+    mol = Chem.MolFromSmiles(smiles)
+    if mol:
+        return Chem.MolToSmiles(mol)
 
-    try:
-        fixed = fix_parentheses(smiles)
-        fixed = fix_brackets(fixed)
-        mol = Chem.MolFromSmiles(fixed)
-        if mol is not None:
-            return Chem.MolToSmiles(mol, canonical=True)
-    except Exception:
-        pass
+    # ── Step 2: Fix unbalanced parentheses ──────────────────────────────
+    open_count  = smiles.count('(')
+    close_count = smiles.count(')')
+    if open_count > close_count:
+        smiles += ')' * (open_count - close_count)
+    elif close_count > open_count:
+        smiles = '(' * (close_count - open_count) + smiles
+    mol = Chem.MolFromSmiles(smiles)
+    if mol:
+        return Chem.MolToSmiles(mol)
 
+    # ── Step 3: Fix duplicate ring closure indices ────────────────────────
+    # e.g. c3...c3...c3 — the third c3 is spurious, remove it
+    import re
+    ring_counts = {}
+    for m in re.finditer(r'(?<=[a-zA-Z\]])(\d+)', smiles):
+        idx = m.group(1)
+        ring_counts[idx] = ring_counts.get(idx, 0) + 1
+
+    for idx, count in ring_counts.items():
+        if count > 2:
+            # Remove the extra occurrences beyond the first two
+            pattern = rf'(?<=[a-zA-Z\]]){re.escape(idx)}'
+            matches = list(re.finditer(pattern, smiles))
+            # Remove all occurrences after the second one, working backwards
+            for m in reversed(matches[2:]):
+                smiles = smiles[:m.start()] + smiles[m.end():]
+            mol = Chem.MolFromSmiles(smiles)
+            if mol:
+                return Chem.MolToSmiles(mol)
+
+    # ── Step 4: Force sanitize ────────────────────────────────────────────
     try:
         mol = Chem.MolFromSmiles(smiles, sanitize=False)
-        if mol is not None:
-            try:
-                Chem.SanitizeMol(mol)
-                return Chem.MolToSmiles(mol, canonical=True)
-            except Exception:
-                Chem.SanitizeMol(mol, catchErrors=True)
-                return Chem.MolToSmiles(mol, canonical=True)
+        if mol:
+            Chem.SanitizeMol(mol)
+            return Chem.MolToSmiles(mol)
     except Exception:
         pass
 
