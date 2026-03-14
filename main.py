@@ -14,7 +14,7 @@ from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors, Crippen, QED
 from rdkit.Chem.FilterCatalog import FilterCatalogParams, FilterCatalog
 from app.utils import repair_smiles 
 from explainer import MoleculeExplainer
-from rdkit.Chem import Draw, rdChemReactions
+#from rdkit.Chem import Draw, rdChemReactions
 
 sys.path.append(str(Path(__file__).parent))
 
