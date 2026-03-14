@@ -14,7 +14,7 @@ from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors, Crippen, QED
 from rdkit.Chem.FilterCatalog import FilterCatalogParams, FilterCatalog
 from app.utils import repair_smiles 
 from explainer import MoleculeExplainer
-
+from rdkit.Chem import Draw, rdChemReactions
 
 sys.path.append(str(Path(__file__).parent))
 
@@ -118,7 +118,808 @@ class GenerateResponse(BaseModel):
     fallback:   int                 # count of curated fallbacks used
     timestamp:  str
 
+class SynthesisRequest(BaseModel):
+    smiles: str = Field(..., description="SMILES string of the drug-like molecule")
+    score:  float = Field(0.0, description="QML drug-likeness score (0–1)")
+ 
+class ReagentItem(BaseModel):
+    name:         str
+    role:         str        # e.g. "Solvent", "Base", "Catalyst", "Coupling agent"
+    hazard:       str        # e.g. "Flammable", "Corrosive", "Low hazard"
+    hazard_level: str        # "low" | "medium" | "high"
+    cas:          Optional[str] = None
+ 
+class SynthesisStep(BaseModel):
+    step:        int
+    reaction:    str         # reaction type name
+    description: str         # what happens chemically
+    reagents:    List[str]   # names of reagents for this step
+    conditions:  str         # temperature, time, atmosphere
+    yield_est:   str         # e.g. "70–85%"
+    difficulty:  str         # "Easy" | "Moderate" | "Challenging"
+    notes:       str         # practical tips
+ 
+class SafetyNote(BaseModel):
+    category: str            # "PPE", "Waste", "Storage", "Emergency"
+    detail:   str
+ 
+class SynthesisResponse(BaseModel):
+    smiles:            str
+    iupac_hint:        str   # best-guess name from substructure
+    complexity:        str   # "Simple" | "Moderate" | "Complex"
+    total_steps:       int
+    overall_yield_est: str
+    overall_difficulty: str
+    steps:             List[SynthesisStep]
+    all_reagents:      List[ReagentItem]
+    safety_notes:      List[SafetyNote]
+    retrosynthesis_summary: str
+    error:             Optional[str] = None
 
+
+# SYNTHESIS CALCULATION
+
+REACTION_TEMPLATES = [
+ 
+    # ── Amide bond (most common in drugs — peptide/amide coupling) ────────────
+    {
+        "smarts":    "[NX3;H1,H2][CX3](=[OX1])",
+        "reaction":  "Amide Coupling",
+        "description": (
+            "Form the amide bond by coupling a carboxylic acid with an amine "
+            "using a peptide coupling reagent. Activate the acid in situ, then "
+            "add the amine component."
+        ),
+        "reagents": ["HATU", "DIPEA", "DMF", "Carboxylic acid precursor", "Amine precursor"],
+        "conditions": "0 °C → RT, 2–12 h, N₂ atmosphere, anhydrous DMF",
+        "yield_est": "65–90%",
+        "difficulty": "Moderate",
+        "notes": (
+            "Keep reaction anhydrous. HATU can be replaced with EDC/HOBt for "
+            "larger scale. Monitor by TLC (ninhydrin stain). "
+            "Purify by column chromatography (EtOAc/hexane gradient)."
+        ),
+    },
+ 
+    # ── Ester bond ────────────────────────────────────────────────────────────
+    {
+        "smarts":    "[OX2][CX3](=[OX1])[#6]",
+        "reaction":  "Fischer Esterification / Acyl Chloride Route",
+        "description": (
+            "Form the ester by reacting the carboxylic acid with the alcohol "
+            "under acid catalysis (Fischer), or via the acyl chloride for "
+            "higher reactivity and yield."
+        ),
+        "reagents": ["Carboxylic acid precursor", "Alcohol precursor",
+                     "Thionyl chloride (SOCl₂)", "Triethylamine (TEA)", "DCM"],
+        "conditions": "Acyl chloride route: 0 °C → RT, 1–3 h, N₂; Fischer: reflux, H₂SO₄ cat.",
+        "yield_est": "70–92%",
+        "difficulty": "Easy",
+        "notes": (
+            "Acyl chloride route preferred for sensitive substrates. "
+            "SOCl₂ must be handled in a fume hood — highly corrosive. "
+            "Quench with sat. NaHCO₃ to remove acid traces."
+        ),
+    },
+ 
+    # ── Aromatic amine (aniline) — reductive amination or nitro reduction ─────
+    {
+        "smarts":    "[NX3;H1,H2][c]",
+        "reaction":  "Nitro Reduction → Aromatic Amine",
+        "description": (
+            "Introduce the aromatic amine via catalytic hydrogenation of a "
+            "nitro precursor (easily prepared by nitration). "
+            "Fe/AcOH (Baeyer–Villiger) is an alternative for acid-sensitive substrates."
+        ),
+        "reagents": ["Nitro-arene precursor", "Pd/C (10%)", "H₂ (1 atm)",
+                     "EtOH", "Fe powder", "Acetic acid"],
+        "conditions": "H₂/Pd-C: RT, 1–4 h, H₂ balloon; Fe/AcOH: 80 °C, 2 h",
+        "yield_est": "80–95%",
+        "difficulty": "Easy",
+        "notes": (
+            "Filter Pd/C through Celite under N₂ — pyrophoric when wet. "
+            "Confirm complete reduction by TLC (Rf shift) and MS. "
+            "Fe/AcOH route avoids H₂ but requires aqueous workup."
+        ),
+    },
+ 
+    # ── Reductive amination (secondary/tertiary amine from ketone+amine) ──────
+    {
+        "smarts":    "[NX3;H0]([#6])[#6]",
+        "reaction":  "Reductive Amination",
+        "description": (
+            "Condense the ketone/aldehyde with the amine to form an imine "
+            "intermediate, then reduce with NaBH₃CN or NaBH(OAc)₃ to give "
+            "the secondary/tertiary amine."
+        ),
+        "reagents": ["Aldehyde/ketone precursor", "Amine precursor",
+                     "NaBH(OAc)₃", "AcOH (cat.)", "DCE or MeOH"],
+        "conditions": "RT, 12–24 h, open to air tolerated; AcOH 1 equiv. as activator",
+        "yield_est": "60–85%",
+        "difficulty": "Moderate",
+        "notes": (
+            "NaBH(OAc)₃ preferred over NaBH₃CN (less toxic). "
+            "Molecular sieves (4Å) improve yield by removing water. "
+            "Monitor imine formation at 30 min by LC-MS before adding reductant."
+        ),
+    },
+ 
+    # ── Suzuki–Miyaura coupling (biaryl / aryl-heteroaryl) ───────────────────
+    {
+        "smarts":    "[c][c]",
+        "reaction":  "Suzuki–Miyaura Cross-Coupling",
+        "description": (
+            "Couple an aryl/heteroaryl halide with an arylboronic acid using "
+            "Pd(0) catalysis to form the biaryl bond. "
+            "Key step for connecting aromatic fragments."
+        ),
+        "reagents": ["Aryl halide precursor (Br or I preferred)",
+                     "Arylboronic acid", "Pd(PPh₃)₄ or Pd(dppf)Cl₂",
+                     "K₂CO₃ or Cs₂CO₃", "DMF/H₂O (4:1)"],
+        "conditions": "80–100 °C, 4–16 h, N₂ atmosphere, sealed vial",
+        "yield_est": "60–90%",
+        "difficulty": "Moderate",
+        "notes": (
+            "Aryl iodides react faster than bromides. "
+            "Rigorously degas solvent before use (freeze-pump-thaw ×3). "
+            "Pd catalyst loading: 2–5 mol%. "
+            "Filter through silica to remove Pd black before column."
+        ),
+    },
+ 
+    # ── Sulfonamide ───────────────────────────────────────────────────────────
+    {
+        "smarts":    "[NX3][SX4](=[OX1])(=[OX1])",
+        "reaction":  "Sulfonamide Formation",
+        "description": (
+            "React a sulfonyl chloride with an amine (primary or secondary) "
+            "in the presence of a base. "
+            "Sulfonyl chlorides are easily prepared from sulfonic acids via SOCl₂."
+        ),
+        "reagents": ["Sulfonyl chloride precursor", "Amine precursor",
+                     "Pyridine or TEA", "DCM"],
+        "conditions": "0 °C → RT, 1–6 h, N₂; base (2 equiv.) to neutralise HCl",
+        "yield_est": "70–90%",
+        "difficulty": "Easy",
+        "notes": (
+            "Pyridine acts as both base and catalyst. "
+            "Sulfonyl chlorides are lachrymatory — handle in fume hood. "
+            "Wash with 1M HCl then sat. NaHCO₃ to remove pyridine."
+        ),
+    },
+ 
+    # ── Piperazine / cyclic amine ─────────────────────────────────────────────
+    {
+        "smarts":    "[NX3]1CC[NX3]CC1",
+        "reaction":  "N-Alkylation of Piperazine",
+        "description": (
+            "Mono-alkylate piperazine at one nitrogen using an alkyl halide "
+            "or via reductive amination with an aldehyde. "
+            "Protect the second nitrogen as Boc if selectivity is needed."
+        ),
+        "reagents": ["Piperazine", "Alkyl halide or aldehyde",
+                     "K₂CO₃ or NaBH(OAc)₃", "MeCN or DCE",
+                     "Boc₂O (if protection needed)"],
+        "conditions": "60–80 °C, 4–12 h (alkylation); RT 12 h (reductive amination)",
+        "yield_est": "55–80%",
+        "difficulty": "Moderate",
+        "notes": (
+            "Excess piperazine (2–3 equiv.) minimises bis-alkylation. "
+            "Boc protection/deprotection adds 2 steps but improves selectivity. "
+            "Purify by SCX cartridge (catch-and-release) before column."
+        ),
+    },
+ 
+    # ── Morpholine ring ───────────────────────────────────────────────────────
+    {
+        "smarts":    "[NX3]1CCOCC1",
+        "reaction":  "N-Functionalization of Morpholine",
+        "description": (
+            "Alkylate or acylate the morpholine nitrogen. "
+            "Morpholine is commercially available — typically used as a "
+            "nucleophile to install the ring onto an electrophilic fragment."
+        ),
+        "reagents": ["Morpholine", "Electrophile (acid chloride, alkyl halide, or aldehyde)",
+                     "TEA or DIPEA", "DCM or THF"],
+        "conditions": "RT → 60 °C, 1–8 h",
+        "yield_est": "65–88%",
+        "difficulty": "Easy",
+        "notes": (
+            "Morpholine is a weak nucleophile — use activated electrophiles. "
+            "For acylation, 1.1 equiv. acid chloride + 1.5 equiv. TEA in DCM at 0 °C."
+        ),
+    },
+ 
+    # ── Hydroxyl group (phenol or alcohol) ────────────────────────────────────
+    {
+        "smarts":    "[OX2H]",
+        "reaction":  "Phenol/Alcohol Introduction via Demethylation or Reduction",
+        "description": (
+            "Introduce the hydroxyl via BBr₃-mediated O-demethylation of the "
+            "methyl ether precursor, or via reduction of a ketone with NaBH₄. "
+            "Alternatively, use directed ortho-lithiation for phenols."
+        ),
+        "reagents": ["Methyl ether precursor", "BBr₃ (1M in DCM)",
+                     "DCM", "MeOH (quench)", "NaBH₄ (if ketone route)"],
+        "conditions": "BBr₃ route: −78 °C → RT, 2–4 h, N₂ anhydrous; NaBH₄: 0 °C → RT, 1 h",
+        "yield_est": "70–90%",
+        "difficulty": "Moderate",
+        "notes": (
+            "BBr₃ is highly moisture-sensitive — use Schlenk technique. "
+            "Quench carefully with MeOH at 0 °C (vigorous gas evolution). "
+            "Protect other sensitive groups (esters hydrolyse under BBr₃)."
+        ),
+    },
+ 
+    # ── Heterocycle: imidazole / triazole ─────────────────────────────────────
+    {
+        "smarts":    "c1cnc[nH]1",
+        "reaction":  "Imidazole Ring Formation (van Leusen / Debus–Radziszewski)",
+        "description": (
+            "Construct the imidazole ring via the Debus–Radziszewski condensation "
+            "of an aldehyde, an α-diketone, and ammonia; or use van Leusen "
+            "TosMIC reagent for substituted imidazoles."
+        ),
+        "reagents": ["Aldehyde", "TosMIC (tosylmethyl isocyanide)",
+                     "K₂CO₃", "MeOH", "NH₄OAc (Debus route)"],
+        "conditions": "van Leusen: RT→60 °C, 4 h, K₂CO₃/MeOH; Debus: AcOH, 100 °C, 6 h",
+        "yield_est": "50–75%",
+        "difficulty": "Challenging",
+        "notes": (
+            "TosMIC is moisture-sensitive — store at 4 °C. "
+            "van Leusen gives 1,5-disubstituted product; "
+            "control substitution pattern carefully. "
+            "Purify by reverse-phase HPLC if regioisomers form."
+        ),
+    },
+ 
+    # ── Fluorine introduction ─────────────────────────────────────────────────
+    {
+        "smarts":    "[F][c]",
+        "reaction":  "Aromatic Fluorination (Balz–Schiemann / Halex)",
+        "description": (
+            "Introduce aryl fluorine via Balz–Schiemann reaction "
+            "(diazotisation of aniline → fluoroborate salt → thermolysis) "
+            "or nucleophilic Halex exchange on activated aryl chlorides."
+        ),
+        "reagents": ["Aniline precursor", "NaNO₂", "HBF₄",
+                     "KF (Halex)", "DMSO (Halex solvent)"],
+        "conditions": "Balz–Schiemann: 0 °C diazotisation, then 150 °C thermolysis; Halex: 160 °C, 12 h",
+        "yield_est": "40–70%",
+        "difficulty": "Challenging",
+        "notes": (
+            "Balz–Schiemann thermolysis can be exothermic — scale up carefully. "
+            "Halex requires electron-withdrawing groups ortho/para to the halide. "
+            "Consider purchasing fluorinated building blocks to avoid this step."
+        ),
+    },
+ 
+    # ── Carbamate (urethane) ──────────────────────────────────────────────────
+    {
+        "smarts":    "[NX3][CX3](=[OX1])[OX2]",
+        "reaction":  "Carbamate Formation",
+        "description": (
+            "React an amine with a chloroformate or CDI-activated alcohol "
+            "to form the carbamate (urethane) linkage. "
+            "Boc protection/deprotection is a special case of this reaction."
+        ),
+        "reagents": ["Amine precursor", "Chloroformate or Boc₂O",
+                     "TEA or DIPEA", "DCM", "DMAP (cat.)"],
+        "conditions": "0 °C → RT, 1–4 h, N₂",
+        "yield_est": "75–92%",
+        "difficulty": "Easy",
+        "notes": (
+            "Chloroformates are lachrymatory and moisture-sensitive. "
+            "DMAP (0.1 equiv.) dramatically accelerates reaction. "
+            "Boc deprotection: 4M HCl in dioxane or TFA/DCM (1:1), RT, 1 h."
+        ),
+    },
+]
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+# REAGENT LIBRARY
+# Maps reagent name → ReagentItem metadata
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+REAGENT_LIBRARY = {
+    "HATU": ReagentItem(
+        name="HATU", role="Coupling agent",
+        hazard="Irritant — avoid inhalation", hazard_level="medium",
+        cas="148893-10-1"
+    ),
+    "DIPEA": ReagentItem(
+        name="DIPEA (Hünig's base)", role="Base",
+        hazard="Flammable, corrosive vapour", hazard_level="medium",
+        cas="7087-68-5"
+    ),
+    "DMF": ReagentItem(
+        name="DMF (N,N-Dimethylformamide)", role="Solvent",
+        hazard="Reproductive toxin (Cat. 1B) — minimise exposure", hazard_level="high",
+        cas="68-12-2"
+    ),
+    "DCM": ReagentItem(
+        name="DCM (Dichloromethane)", role="Solvent",
+        hazard="Suspected carcinogen — use in fume hood", hazard_level="medium",
+        cas="75-09-2"
+    ),
+    "Pd/C (10%)": ReagentItem(
+        name="Palladium on Carbon 10%", role="Heterogeneous catalyst",
+        hazard="Pyrophoric when wet — handle under N₂, dispose as heavy metal waste",
+        hazard_level="high", cas="7440-05-3"
+    ),
+    "NaBH(OAc)₃": ReagentItem(
+        name="Sodium triacetoxyborohydride", role="Mild reducing agent",
+        hazard="Moisture-sensitive, irritant", hazard_level="low",
+        cas="56553-60-7"
+    ),
+    "Pd(PPh₃)₄": ReagentItem(
+        name="Tetrakis(triphenylphosphine)palladium(0)", role="Pd(0) catalyst",
+        hazard="Air/moisture sensitive — store under N₂ at −20 °C", hazard_level="medium",
+        cas="14221-01-3"
+    ),
+    "Pd(dppf)Cl₂": ReagentItem(
+        name="[1,1′-Bis(diphenylphosphino)ferrocene]palladium(II) dichloride",
+        role="Pd(II) precatalyst",
+        hazard="Irritant, store under N₂", hazard_level="medium",
+        cas="72287-26-4"
+    ),
+    "K₂CO₃": ReagentItem(
+        name="Potassium carbonate", role="Base",
+        hazard="Low hazard — mild irritant", hazard_level="low",
+        cas="584-08-7"
+    ),
+    "Cs₂CO₃": ReagentItem(
+        name="Caesium carbonate", role="Strong base",
+        hazard="Irritant, expensive — use K₂CO₃ when possible", hazard_level="low",
+        cas="534-17-8"
+    ),
+    "Thionyl chloride (SOCl₂)": ReagentItem(
+        name="Thionyl chloride", role="Activating agent",
+        hazard="Highly corrosive, reacts violently with water — fume hood essential",
+        hazard_level="high", cas="7719-09-7"
+    ),
+    "TEA": ReagentItem(
+        name="Triethylamine (TEA)", role="Base",
+        hazard="Flammable, irritant", hazard_level="low",
+        cas="121-44-8"
+    ),
+    "Pyridine": ReagentItem(
+        name="Pyridine", role="Base / catalyst",
+        hazard="Flammable, foul odour, possible carcinogen — use in fume hood",
+        hazard_level="medium", cas="110-86-1"
+    ),
+    "BBr₃ (1M in DCM)": ReagentItem(
+        name="Boron tribromide (1M in DCM)", role="Lewis acid / demethylating agent",
+        hazard="Highly corrosive, moisture-sensitive — Schlenk technique required",
+        hazard_level="high", cas="10294-33-4"
+    ),
+    "TosMIC (tosylmethyl isocyanide)": ReagentItem(
+        name="TosMIC", role="Heterocycle building block",
+        hazard="Irritant, moisture-sensitive", hazard_level="medium",
+        cas="36635-61-7"
+    ),
+    "NaNO₂": ReagentItem(
+        name="Sodium nitrite", role="Diazotising agent",
+        hazard="Oxidiser, toxic — avoid mixing with organics outside reaction",
+        hazard_level="high", cas="7632-00-0"
+    ),
+    "HBF₄": ReagentItem(
+        name="Tetrafluoroboric acid", role="Fluoride source",
+        hazard="Corrosive, fluoride toxicity risk", hazard_level="high",
+        cas="16872-11-0"
+    ),
+    "EtOH": ReagentItem(
+        name="Ethanol", role="Solvent",
+        hazard="Flammable — keep away from ignition sources", hazard_level="low",
+        cas="64-17-5"
+    ),
+    "MeOH": ReagentItem(
+        name="Methanol", role="Solvent / quench",
+        hazard="Flammable, toxic if ingested", hazard_level="medium",
+        cas="67-56-1"
+    ),
+    "THF": ReagentItem(
+        name="Tetrahydrofuran (THF)", role="Solvent",
+        hazard="Highly flammable, forms explosive peroxides on storage — test for peroxides before use",
+        hazard_level="medium", cas="109-99-9"
+    ),
+    "MeCN": ReagentItem(
+        name="Acetonitrile (MeCN)", role="Solvent",
+        hazard="Flammable, irritant", hazard_level="low",
+        cas="75-05-8"
+    ),
+    "DMSO": ReagentItem(
+        name="Dimethyl sulfoxide (DMSO)", role="High-boiling polar solvent",
+        hazard="Low acute toxicity but penetrates skin — carry dissolved reagents through skin",
+        hazard_level="medium", cas="67-68-5"
+    ),
+    "Boc₂O": ReagentItem(
+        name="Di-tert-butyl dicarbonate (Boc₂O)", role="Protecting group reagent",
+        hazard="Irritant, releases CO₂ on reaction", hazard_level="low",
+        cas="24424-99-5"
+    ),
+    "DMAP (cat.)": ReagentItem(
+        name="4-Dimethylaminopyridine (DMAP)", role="Nucleophilic catalyst",
+        hazard="Toxic — handle with care, avoid skin contact", hazard_level="medium",
+        cas="1122-58-3"
+    ),
+    "NaBH₄": ReagentItem(
+        name="Sodium borohydride", role="Mild reducing agent",
+        hazard="Moisture-sensitive, flammable H₂ release — no protic solvents until cool",
+        hazard_level="medium", cas="16940-66-2"
+    ),
+    "AcOH (cat.)": ReagentItem(
+        name="Acetic acid (glacial)", role="Catalyst / pH modifier",
+        hazard="Corrosive vapour — fume hood", hazard_level="low",
+        cas="64-19-7"
+    ),
+    "Fe powder": ReagentItem(
+        name="Iron powder", role="Reductant (Baeyer–Villiger reduction)",
+        hazard="Flammable solid — keep dry", hazard_level="low",
+        cas="7439-89-6"
+    ),
+    "Acetic acid": ReagentItem(
+        name="Acetic acid", role="Solvent / proton source",
+        hazard="Corrosive at high concentration", hazard_level="low",
+        cas="64-19-7"
+    ),
+    "Morpholine": ReagentItem(
+        name="Morpholine", role="Amine building block",
+        hazard="Flammable, corrosive vapour", hazard_level="medium",
+        cas="110-91-8"
+    ),
+    "Piperazine": ReagentItem(
+        name="Piperazine", role="Diamine building block",
+        hazard="Irritant, sensitiser — use gloves", hazard_level="low",
+        cas="110-85-0"
+    ),
+    "K₂CO₃ or Cs₂CO₃": ReagentItem(
+        name="K₂CO₃ or Cs₂CO₃", role="Base",
+        hazard="Low hazard", hazard_level="low", cas="584-08-7"
+    ),
+    "DMF/H₂O (4:1)": ReagentItem(
+        name="DMF/Water mixture", role="Solvent system",
+        hazard="DMF is a reproductive toxin — minimise skin contact", hazard_level="high",
+        cas=None
+    ),
+}
+ 
+# Default reagent for anything not in the library
+def _reagent_info(name: str) -> ReagentItem:
+    if name in REAGENT_LIBRARY:
+        return REAGENT_LIBRARY[name]
+    return ReagentItem(
+        name=name, role="Reagent",
+        hazard="Consult SDS before use", hazard_level="medium"
+    )
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+# COMPLEXITY SCORER
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+def _score_complexity(mol) -> tuple[str, str]:
+    """
+    Returns (complexity_label, overall_difficulty) based on molecular features.
+    """
+    mw        = Descriptors.ExactMolWt(mol)
+    n_rings   = rdMolDescriptors.CalcNumRings(mol)
+    rot_bonds = rdMolDescriptors.CalcNumRotatableBonds(mol)
+    n_stereo  = len(Chem.FindMolChiralCenters(mol, includeUnassigned=True))
+    n_heavy   = mol.GetNumHeavyAtoms()
+ 
+    score = 0
+    if mw > 500:      score += 2
+    elif mw > 350:    score += 1
+    if n_rings > 3:   score += 2
+    elif n_rings > 1: score += 1
+    if n_stereo > 1:  score += 2
+    elif n_stereo > 0: score += 1
+    if rot_bonds > 8: score += 1
+    if n_heavy > 35:  score += 1
+ 
+    if score <= 2:
+        return "Simple",   "Easy"
+    elif score <= 5:
+        return "Moderate", "Moderate"
+    else:
+        return "Complex",  "Challenging"
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+# YIELD ESTIMATOR
+# Combines per-step yield estimates into an overall yield
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+def _overall_yield(steps: list[SynthesisStep]) -> str:
+    """
+    Multiply step yield midpoints to get overall yield estimate.
+    """
+    if not steps:
+        return "N/A"
+    product = 1.0
+    for step in steps:
+        # Parse "X–Y%" → midpoint
+        try:
+            parts = step.yield_est.replace('%', '').split('–')
+            lo, hi = float(parts[0]), float(parts[1])
+            product *= ((lo + hi) / 2) / 100.0
+        except Exception:
+            product *= 0.75
+    pct = round(product * 100, 1)
+    # Express as a range ±10%
+    lo = max(5, pct - 10)
+    hi = min(95, pct + 10)
+    return f"{lo:.0f}–{hi:.0f}%"
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+# SAFETY NOTES GENERATOR
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+def _build_safety_notes(matched_templates: list[dict], mol) -> list[SafetyNote]:
+    notes = []
+ 
+    # Always-present baseline notes
+    notes.append(SafetyNote(
+        category="PPE",
+        detail="Lab coat, nitrile gloves, and safety glasses required at all times. "
+               "Use a fume hood for all liquid transfers and reactions."
+    ))
+    notes.append(SafetyNote(
+        category="Waste",
+        detail="Segregate halogenated (DCM, CHCl₃) from non-halogenated waste. "
+               "Heavy metal waste (Pd, Rh) must be collected separately for specialist disposal."
+    ))
+ 
+    # Conditional notes based on reagents used
+    reagent_names = {r for t in matched_templates for r in t.get("reagents", [])}
+ 
+    if any(r in reagent_names for r in ["Pd/C (10%)", "Pd(PPh₃)₄", "Pd(dppf)Cl₂"]):
+        notes.append(SafetyNote(
+            category="Storage",
+            detail="Palladium catalysts: store under N₂ at −20 °C. "
+                   "Wet Pd/C is pyrophoric — never allow to dry on filter paper."
+        ))
+    if "BBr₃ (1M in DCM)" in reagent_names:
+        notes.append(SafetyNote(
+            category="Emergency",
+            detail="BBr₃ contact: flush with large volumes of water for 15 min, "
+                   "seek medical attention immediately. Keep neutralising solution (NaHCO₃) nearby."
+        ))
+    if "DMF" in reagent_names or "DMF/H₂O (4:1)" in reagent_names:
+        notes.append(SafetyNote(
+            category="PPE",
+            detail="DMF is a reproductive toxin — use double gloves, minimise skin exposure. "
+                   "Do not use DMF near open flames (flash point 58 °C)."
+        ))
+    if any(r in reagent_names for r in ["Thionyl chloride (SOCl₂)", "NaNO₂", "HBF₄"]):
+        notes.append(SafetyNote(
+            category="Emergency",
+            detail="Highly reactive reagents in use. Ensure eyewash station and "
+                   "safety shower are accessible. Work with a partner."
+        ))
+ 
+    # Stereocentre warning
+    stereocentres = Chem.FindMolChiralCenters(mol, includeUnassigned=True)
+    if stereocentres:
+        notes.append(SafetyNote(
+            category="Storage",
+            detail=f"Molecule has {len(stereocentres)} stereocentre(s). "
+                   "Confirm absolute configuration by chiral HPLC and optical rotation. "
+                   "Store enantiopure material at −20 °C under N₂."
+        ))
+ 
+    notes.append(SafetyNote(
+        category="Waste",
+        detail="All intermediates and final compound should be characterised "
+               "by ¹H NMR, ¹³C NMR, and HRMS before biological testing."
+    ))
+ 
+    return notes
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+# RETROSYNTHESIS SUMMARY TEXT
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+def _build_summary(mol, matched_templates: list[dict], complexity: str) -> str:
+    mw      = round(Descriptors.ExactMolWt(mol), 1)
+    n_rings = rdMolDescriptors.CalcNumRings(mol)
+    n_stereo = len(Chem.FindMolChiralCenters(mol, includeUnassigned=True))
+    rxn_names = [t["reaction"] for t in matched_templates]
+ 
+    summary = (
+        f"Retrosynthetic analysis identifies {len(matched_templates)} key bond "
+        f"disconnection(s) for this {complexity.lower()} molecule (MW {mw} Da, "
+        f"{n_rings} ring(s)"
+    )
+    if n_stereo:
+        summary += f", {n_stereo} stereocentre(s)"
+    summary += "). "
+ 
+    if rxn_names:
+        summary += f"Primary synthetic steps: {', '.join(rxn_names)}. "
+ 
+    summary += (
+        "The proposed route uses commercially available starting materials "
+        "and standard laboratory equipment. "
+    )
+ 
+    if complexity == "Simple":
+        summary += (
+            "This molecule is accessible in a straightforward linear sequence "
+            "suitable for a well-equipped undergraduate lab."
+        )
+    elif complexity == "Moderate":
+        summary += (
+            "A postgraduate-level synthesis is recommended. "
+            "Allow 1–2 weeks for synthesis and purification."
+        )
+    else:
+        summary += (
+            "This is a challenging target requiring experienced synthetic chemists, "
+            "Schlenk/glovebox technique, and chiral resolution or asymmetric synthesis. "
+            "Allow 3–6 weeks for a skilled medicinal chemistry team."
+        )
+ 
+    return summary
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+# IUPAC HINT (best-effort name from known fragments)
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+def _iupac_hint(mol) -> str:
+    """
+    Heuristic name hint — not a full IUPAC name, but informative for the scientist.
+    Uses ring counts, MW, and heteroatom composition.
+    """
+    mw = round(Descriptors.ExactMolWt(mol), 1)
+    n_ar = rdMolDescriptors.CalcNumAromaticRings(mol)
+    n_rings = rdMolDescriptors.CalcNumRings(mol)
+    hbd = rdMolDescriptors.CalcNumHBD(mol)
+    hba = rdMolDescriptors.CalcNumHBA(mol)
+ 
+    parts = []
+    if n_ar >= 2:
+        parts.append("biaryl")
+    elif n_ar == 1:
+        parts.append("monoaryl")
+    if n_rings > n_ar:
+        parts.append(f"{n_rings - n_ar} aliphatic ring(s)")
+    parts.append(f"MW {mw}")
+    parts.append(f"HBD {hbd} / HBA {hba}")
+ 
+    return f"Drug-like compound — {', '.join(parts)}. Use RDKit or ChemDraw for full IUPAC name."
+ 
+ 
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN SYNTHESIS COMPUTATION
+# ══════════════════════════════════════════════════════════════════════════════
+ 
+def _compute_synthesis(smiles: str, score: float) -> dict:
+    """
+    Core synthesis route computation.
+    Returns a dict matching SynthesisResponse fields.
+    """
+    # ── Parse molecule ────────────────────────────────────────────────────────
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return {
+            "smiles": smiles, "iupac_hint": "N/A", "complexity": "N/A",
+            "total_steps": 0, "overall_yield_est": "N/A",
+            "overall_difficulty": "N/A", "steps": [], "all_reagents": [],
+            "safety_notes": [], "retrosynthesis_summary": "",
+            "error": f"Could not parse SMILES: {smiles}",
+        }
+ 
+    # ── Match reaction templates ──────────────────────────────────────────────
+    matched = []
+    seen_reactions = set()
+ 
+    for template in REACTION_TEMPLATES:
+        patt = Chem.MolFromSmarts(template["smarts"])
+        if patt is None:
+            continue
+        if mol.HasSubstructMatch(patt):
+            if template["reaction"] not in seen_reactions:
+                matched.append(template)
+                seen_reactions.add(template["reaction"])
+ 
+    # Always add a final purification step
+    purification_step = {
+        "reaction":    "Purification & Characterisation",
+        "description": (
+            "Purify the crude product by silica gel column chromatography "
+            "(or preparative HPLC for polar/complex molecules). "
+            "Characterise by ¹H NMR, ¹³C NMR, HRMS, and HPLC purity (>95%)."
+        ),
+        "reagents":   ["Silica gel", "EtOAc", "Hexane", "MeOH", "CDCl₃ (NMR)"],
+        "conditions": "RT; gradient elution; lyophilise if aqueous HPLC used",
+        "yield_est":  "85–98%",
+        "difficulty": "Easy",
+        "notes": (
+            "Record ¹H NMR in CDCl₃ or DMSO-d₆. "
+            "HRMS (ESI+) to confirm molecular formula. "
+            "Check HPLC purity at 214 nm and 254 nm. "
+            "Store final compound at −20 °C as DMSO stock (10 mM)."
+        ),
+    }
+ 
+    # If no templates matched, add a generic linear synthesis step
+    if not matched:
+        matched = [{
+            "reaction":    "Linear Convergent Synthesis",
+            "description": (
+                "No specific reaction motif detected automatically. "
+                "Propose a convergent synthesis by breaking the molecule at "
+                "the most complex bond disconnection (largest fragment split). "
+                "Consult SciFinder or Reaxys for literature precedent."
+            ),
+            "reagents":   ["Starting material A", "Starting material B",
+                           "Appropriate coupling reagent", "Suitable solvent"],
+            "conditions": "Optimise based on functional groups present",
+            "yield_est":  "50–75%",
+            "difficulty": "Moderate",
+            "notes": (
+                "Use RDKit retrosynthesis or consult ASKCOS/Chematica "
+                "for automated route planning. "
+                "Purchase the closest commercially available analogue as "
+                "a reference standard."
+            ),
+        }]
+ 
+    # ── Build step objects ────────────────────────────────────────────────────
+    steps = []
+    all_template_steps = matched + [purification_step]
+    for i, t in enumerate(all_template_steps, start=1):
+        steps.append(SynthesisStep(
+            step=i,
+            reaction=t["reaction"],
+            description=t["description"],
+            reagents=t["reagents"],
+            conditions=t["conditions"],
+            yield_est=t["yield_est"],
+            difficulty=t["difficulty"],
+            notes=t["notes"],
+        ))
+ 
+    # ── Collect all unique reagents ───────────────────────────────────────────
+    seen_reagents = set()
+    all_reagents  = []
+    for t in all_template_steps:
+        for r_name in t.get("reagents", []):
+            if r_name not in seen_reagents:
+                seen_reagents.add(r_name)
+                all_reagents.append(_reagent_info(r_name))
+ 
+    # ── Complexity + yield ────────────────────────────────────────────────────
+    complexity, overall_difficulty = _score_complexity(mol)
+    overall_yield = _overall_yield(steps[:-1])  # exclude purification from yield calc
+ 
+    # ── Safety ────────────────────────────────────────────────────────────────
+    safety_notes = _build_safety_notes(matched, mol)
+ 
+    # ── Summary ───────────────────────────────────────────────────────────────
+    summary = _build_summary(mol, matched, complexity)
+ 
+    return {
+        "smiles":               smiles,
+        "iupac_hint":           _iupac_hint(mol),
+        "complexity":           complexity,
+        "total_steps":          len(steps),
+        "overall_yield_est":    overall_yield,
+        "overall_difficulty":   overall_difficulty,
+        "steps":                steps,
+        "all_reagents":         all_reagents,
+        "safety_notes":         safety_notes,
+        "retrosynthesis_summary": summary,
+        "error":                None,
+    }
+ 
+ 
 # ── Updated /generate endpoint ────────────────────────────────────────────────
 
 @app.post("/generate", response_model=GenerateResponse, tags=["Generation"])
@@ -580,6 +1381,53 @@ async def explain_prediction(request: ExplainRequest):
         explanation_text=result["explanation_text"],
         confidence=result["confidence"],
     )
+
+@app.post("/synthesis", response_model=SynthesisResponse, tags=["Lab Synthesis"])
+async def lab_synthesis(request: SynthesisRequest):
+    """
+    Generate a wet-lab synthesis route for a drug-like molecule.
+ 
+    Uses RDKit substructure matching against a library of named reaction
+    templates to identify key bond disconnections, then returns:
+    - Step-by-step synthesis instructions
+    - Reagents with hazard classifications
+    - Safety notes and PPE requirements
+    - Estimated yields and overall difficulty
+ 
+    Only meaningful for molecules with score >= 0.4 (medium/high drug-likeness).
+    """
+    if request.score < 0.4:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Drug-likeness score {request.score:.3f} is too low for synthesis planning. "
+                "Lab synthesis is only suggested for molecules with score ≥ 0.4 "
+                "(medium or high drug-likeness)."
+            )
+        )
+ 
+    repaired = repair_smiles(request.smiles)
+    if repaired is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not parse or repair SMILES: {request.smiles}"
+        )
+ 
+    try:
+        loop   = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            executor,
+            lambda: _compute_synthesis(repaired, request.score)
+        )
+    except Exception as e:
+        logger.error(f"Synthesis computation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+ 
+    if result.get("error"):
+        raise HTTPException(status_code=422, detail=result["error"])
+ 
+    return SynthesisResponse(**result)
+ 
 # ── Examples ──────────────────────────────────────────────────────────────────
 
 @app.get("/examples", tags=["Examples"])
