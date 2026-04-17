@@ -1427,6 +1427,619 @@ async def lab_synthesis(request: SynthesisRequest):
         raise HTTPException(status_code=422, detail=result["error"])
  
     return SynthesisResponse(**result)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POST-CLASSIFICATION RANKING  —  add this block to the bottom of main.py
+# (after the /synthesis endpoint, before any if __name__ == "__main__" block)
+#
+# Endpoint: POST /rank_candidates
+#
+# Pipeline
+# ────────
+#  1. Accept a list of SMILES + their QML drug-likeness scores, plus a
+#     free-text symptom/disease description from the user.
+#  2. For every molecule compute a SymptomRelevanceScore (0–1) using three
+#     independent signals that are blended into a weighted sum:
+#
+#       a) Pharmacophore / descriptor similarity  (RDKit, no model needed)
+#          Compare each candidate against a lightweight fingerprint centroid
+#          built from the known reference drugs we keep in DISEASE_DRUG_PROFILES.
+#          Uses Morgan-FP Tanimoto similarity → fast, always available.
+#
+#       b) Lipinski / ADMET fit for the disease class   (RDKit)
+#          Each disease profile carries preferred physicochemical windows
+#          (logP, TPSA, MW, HBD/A).  A molecule that hits those windows
+#          gets a bonus; one that misses is penalised.
+#
+#       c) LLM semantic relevance  (Anthropic API, optional)
+#          If USE_LLM_RELEVANCE = True the endpoint asks claude-sonnet-4
+#          to score how well the molecule's ADMET profile matches the
+#          therapeutic context described by the user.
+#          Falls back to 0.5 if the API call fails so the endpoint never
+#          crashes due to LLM unavailability.
+#
+#  3. Final score = w_qml * QML_score + w_sym * SymptomRelevanceScore
+#     Weights are tunable via the request body.
+#  4. Candidates are sorted descending by final score and returned with
+#     a plain-English explanation for each rank decision.
+#
+# No model retraining is required.
+# ══════════════════════════════════════════════════════════════════════════════
+
+import os
+import json
+import httpx
+from rdkit.Chem import DataStructs
+from rdkit.Chem import AllChem as _AllChem
+
+
+# ── tuneable flag ─────────────────────────────────────────────────────────────
+# Set to False (or remove the env var) to skip LLM calls and use only RDKit.
+USE_LLM_RELEVANCE: bool = os.getenv("USE_LLM_RELEVANCE", "true").lower() == "true"
+
+ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL   = "claude-sonnet-4-20250514"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DISEASE  →  DRUG PROFILE  KNOWLEDGE BASE
+#
+# Each entry encodes:
+#   "aliases"      – lower-case strings we match against the user's query
+#   "ref_smiles"   – 1-3 reference drugs for this indication (fingerprint centroid)
+#   "physchem"     – ideal physicochemical window for this disease class
+#   "targets"      – plain-English target names (used in explanation text)
+#   "context"      – short sentence fed to the LLM for semantic scoring
+# ══════════════════════════════════════════════════════════════════════════════
+
+DISEASE_DRUG_PROFILES: dict[str, dict] = {
+
+    "diabetes": {
+        "aliases": ["diabetes", "diabetic", "hyperglycemia", "insulin resistance",
+                    "type 2 diabetes", "t2dm", "blood sugar"],
+        "ref_smiles": [
+            "CN(C)C(=N)NC(=N)N",                         # metformin
+            "OC[C@H]1O[C@@H](Oc2cc3c(=O)c4ccccc4oc3cc2)[C@H](O)[C@@H](O)[C@@H]1O",  # dapagliflozin-like
+            "Cc1cc(-c2ccc(N3CCNCC3)cc2)no1",             # pioglitazone scaffold
+        ],
+        "physchem": {"mw": (150, 500), "logp": (-1, 3), "tpsa": (60, 140), "hbd": (1, 5)},
+        "targets": ["AMPK", "SGLT2", "PPARγ", "DPP-4", "GLP-1 receptor"],
+        "context": (
+            "The molecule should be active against type-2 diabetes targets such as "
+            "AMPK activation, SGLT2 inhibition, or PPARγ agonism. "
+            "Prefer moderate polarity (low logP), good oral bioavailability, and "
+            "minimal CYP2C8 liability."
+        ),
+    },
+
+    "hypertension": {
+        "aliases": ["hypertension", "high blood pressure", "hbp", "antihypertensive",
+                    "blood pressure"],
+        "ref_smiles": [
+            "CCOC(=O)C1=C(CCCN2CCCCC2)NC(C)=C(C(=O)OCC)C1c1ccccc1Cl",  # amlodipine-like
+            "CC(C)(C(=O)O)c1ccc(cc1)N1CCC(CC1)C(=O)Nc1cccc(c1)C(F)(F)F",
+            "O=C(O)CCc1ccc(cc1)N1C(=O)c2ccccc2N=C1O",
+        ],
+        "physchem": {"mw": (250, 600), "logp": (0, 4), "tpsa": (50, 120), "hbd": (0, 4)},
+        "targets": ["ACE", "AT1 receptor", "L-type Ca²⁺ channel", "β1-adrenoceptor"],
+        "context": (
+            "The molecule should be suitable for treating hypertension — ideally "
+            "an ACE inhibitor, ARB, calcium-channel blocker, or beta-blocker scaffold. "
+            "Good oral bioavailability and once-daily dosing profile preferred."
+        ),
+    },
+
+    "cancer": {
+        "aliases": ["cancer", "oncology", "tumor", "tumour", "carcinoma",
+                    "leukemia", "lymphoma", "antitumor", "anticancer",
+                    "kinase inhibitor", "apoptosis"],
+        "ref_smiles": [
+            "Cn1cnc2c1c(=O)n(c(=O)n2C)C",              # imatinib-like fragment
+            "C=CC(=O)Nc1ccc2ncnc(Nc3cccc(c3)C#C)c2c1",  # erlotinib-like
+            "O=C(Nc1ccc(cc1)N1CCCC1=O)c1ccc(cc1)CN1CCN(CC1)C",
+        ],
+        "physchem": {"mw": (300, 700), "logp": (1, 5), "tpsa": (50, 150), "hbd": (0, 5)},
+        "targets": ["EGFR", "BCR-ABL", "VEGFR", "CDK4/6", "PARP", "PD-1/PD-L1"],
+        "context": (
+            "The molecule should exhibit anticancer activity — ideally a kinase "
+            "inhibitor, PARP inhibitor, or immune checkpoint modulator. "
+            "Selectivity over normal cells and cell permeability are important."
+        ),
+    },
+
+    "depression": {
+        "aliases": ["depression", "depressive", "antidepressant", "mdd",
+                    "major depressive disorder", "serotonin", "ssri", "snri"],
+        "ref_smiles": [
+            "CNCCC(Oc1ccc(cc1)C(F)(F)F)c1ccccc1",       # fluoxetine
+            "CN(C)CCCC1(c2ccc(F)cc2)OCc2cc(Br)ccc21",   # escitalopram-like
+            "OC(=O)c1ccc(cc1)NC(=O)c1ccccc1",
+        ],
+        "physchem": {"mw": (200, 450), "logp": (1, 4), "tpsa": (20, 80), "hbd": (0, 3)},
+        "targets": ["SERT", "NET", "DAT", "5-HT2A", "monoamine oxidase"],
+        "context": (
+            "The molecule should be relevant to major depressive disorder — "
+            "ideally a serotonin/norepinephrine reuptake inhibitor or monoamine "
+            "oxidase inhibitor scaffold. CNS penetration (low TPSA, moderate logP) "
+            "and low hERG liability are critical."
+        ),
+    },
+
+    "alzheimer": {
+        "aliases": ["alzheimer", "alzheimer's", "dementia", "cognitive decline",
+                    "acetylcholinesterase", "ache", "memantine", "donepezil"],
+        "ref_smiles": [
+            "COc1ccc(CCN(C)C)cc1OC",                     # donepezil fragment
+            "CN1CCCCC1CCc1ccc(OC)c(OC)c1",
+            "CN(C)C/C=C/c1ccc2c(c1)CCC(=O)O2",
+        ],
+        "physchem": {"mw": (200, 500), "logp": (1, 4), "tpsa": (20, 90), "hbd": (0, 3)},
+        "targets": ["AChE", "BuChE", "NMDA receptor", "β-secretase (BACE1)"],
+        "context": (
+            "The molecule should treat Alzheimer's disease — ideally an "
+            "acetylcholinesterase inhibitor, BACE1 inhibitor, or NMDA receptor "
+            "modulator. Excellent CNS penetration (low TPSA <90, logP 1–4) "
+            "and low P-gp efflux ratio are essential."
+        ),
+    },
+
+    "infection": {
+        "aliases": ["infection", "antibiotic", "antibacterial", "antimicrobial",
+                    "bacterial", "bacteria", "sepsis", "pneumonia", "tuberculosis"],
+        "ref_smiles": [
+            "CC1(C)SC2C(NC(=O)Cc3ccccc3)C(=O)N2C1C(=O)O",  # ampicillin-like
+            "OC(=O)c1cn(C2CC2)c2cc(N3CCNCC3)c(F)cc2c1=O",  # ciprofloxacin
+            "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",
+        ],
+        "physchem": {"mw": (250, 600), "logp": (-1, 3), "tpsa": (60, 160), "hbd": (1, 6)},
+        "targets": ["DNA gyrase", "bacterial ribosome", "β-lactamase", "peptidoglycan synthesis"],
+        "context": (
+            "The molecule should have antibacterial or antimicrobial activity. "
+            "Good aqueous solubility, minimal efflux by bacterial MDR pumps, "
+            "and activity against both Gram-positive and Gram-negative organisms "
+            "are ideal. Low mammalian cytotoxicity is essential."
+        ),
+    },
+
+    "inflammation": {
+        "aliases": ["inflammation", "inflammatory", "arthritis", "nsaid",
+                    "cox", "autoimmune", "rheumatoid", "anti-inflammatory"],
+        "ref_smiles": [
+            "CC(C(=O)O)c1ccc(cc1)C(C)C",                # ibuprofen
+            "Cc1ccc(-c2ccc(cc2)S(N)(=O)=O)cc1C",
+            "CC(=O)Oc1ccccc1C(=O)O",                     # aspirin
+        ],
+        "physchem": {"mw": (150, 500), "logp": (0, 4), "tpsa": (40, 120), "hbd": (0, 4)},
+        "targets": ["COX-1", "COX-2", "5-LOX", "TNF-α", "IL-6", "JAK1/2"],
+        "context": (
+            "The molecule should exhibit anti-inflammatory activity — ideally a "
+            "COX-2 selective inhibitor, JAK inhibitor, or TNF-α modulator. "
+            "Minimal GI side effects (low COX-1 activity) and good oral "
+            "bioavailability are key."
+        ),
+    },
+}
+
+# Fallback profile used when no disease is recognised
+_FALLBACK_PROFILE: dict = {
+    "aliases": [],
+    "ref_smiles": [],
+    "physchem": {"mw": (150, 600), "logp": (-1, 5), "tpsa": (20, 160), "hbd": (0, 6)},
+    "targets": ["unspecified target"],
+    "context": (
+        "Score this molecule on general drug-likeness. "
+        "Prefer Lipinski-compliant structures with good ADMET properties."
+    ),
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REQUEST / RESPONSE MODELS
+# ══════════════════════════════════════════════════════════════════════════════
+
+class CandidateInput(BaseModel):
+    smiles: str = Field(..., description="SMILES string of the molecule")
+    qml_score: float = Field(
+        ..., ge=0.0, le=1.0,
+        description="Drug-likeness probability from the QML model (0–1)"
+    )
+    label: Optional[str] = Field(
+        None,
+        description="Optional human-readable label / name for this candidate"
+    )
+
+class RankRequest(BaseModel):
+    candidates: List[CandidateInput] = Field(
+        ..., min_items=1, max_items=20,
+        description="Molecules to rank (1–20)"
+    )
+    symptoms: str = Field(
+        ..., min_length=3,
+        description=(
+            "Free-text description of the target disease or symptoms — "
+            "e.g. 'type-2 diabetes with insulin resistance' or 'bacterial pneumonia'"
+        )
+    )
+    weight_qml: float = Field(
+        default=0.6, ge=0.0, le=1.0,
+        description="Weight given to the QML drug-likeness score (0–1). "
+                    "weight_symptom is inferred as 1 − weight_qml."
+    )
+    use_llm: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Override the server-level USE_LLM_RELEVANCE flag for this request. "
+            "null → use server default."
+        )
+    )
+
+class SignalBreakdown(BaseModel):
+    fingerprint_similarity: float   # Tanimoto vs reference drug centroids
+    physchem_fit:           float   # how well the molecule hits disease physchem window
+    llm_score:              float   # semantic LLM relevance (0.5 if LLM skipped)
+    llm_used:               bool
+
+class RankedCandidate(BaseModel):
+    rank:               int
+    smiles:             str
+    label:              Optional[str]
+    qml_score:          float
+    symptom_relevance:  float           # blended signal (0–1)
+    final_score:        float           # weighted combination
+    signals:            SignalBreakdown
+    explanation:        str             # plain-English reason for this rank
+
+class RankResponse(BaseModel):
+    symptoms:        str
+    disease_matched: str               # which profile was matched (or "general")
+    targets:         List[str]         # known targets for this disease
+    weight_qml:      float
+    weight_symptom:  float
+    ranked:          List[RankedCandidate]
+    timestamp:       str
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPER: match symptoms → disease profile
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _match_disease_profile(symptoms: str) -> tuple[str, dict]:
+    """
+    Returns (disease_key, profile_dict).
+    Uses simple keyword matching — replace with an embedding lookup for production.
+    """
+    lowered = symptoms.lower()
+    for disease, profile in DISEASE_DRUG_PROFILES.items():
+        if any(alias in lowered for alias in profile["aliases"]):
+            return disease, profile
+    return "general", _FALLBACK_PROFILE
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPER: fingerprint similarity signal
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fp_similarity_signal(mol, ref_smiles_list: list[str]) -> float:
+    """
+    Mean Tanimoto similarity between `mol` and the reference drug fingerprints.
+    Returns 0.0 if the reference list is empty or any molecule fails to parse.
+    """
+    if not ref_smiles_list:
+        return 0.5   # neutral when no reference exists
+
+    query_fp = _AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=2048)
+    similarities = []
+    for smi in ref_smiles_list:
+        ref_mol = Chem.MolFromSmiles(smi)
+        if ref_mol is None:
+            continue
+        ref_fp = _AllChem.GetMorganFingerprintAsBitVect(ref_mol, radius=2, nBits=2048)
+        similarities.append(DataStructs.TanimotoSimilarity(query_fp, ref_fp))
+
+    return round(float(sum(similarities) / len(similarities)), 4) if similarities else 0.5
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPER: physicochemical fit signal
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _physchem_fit_signal(smiles: str, physchem_window: dict) -> float:
+    """
+    Fraction of physicochemical criteria that the molecule satisfies.
+    Each criterion contributes equally; result is in [0, 1].
+    """
+    admet = _compute_admet(smiles)
+    if admet.get("error"):
+        return 0.5
+
+    checks = []
+    for prop, (lo, hi) in physchem_window.items():
+        val = admet.get(prop)
+        if val is not None:
+            checks.append(lo <= val <= hi)
+
+    return round(sum(checks) / len(checks), 4) if checks else 0.5
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPER: LLM semantic relevance signal
+# ══════════════════════════════════════════════════════════════════════════════
+
+async def _llm_relevance_signal(
+    smiles: str,
+    admet_data: dict,
+    disease_context: str,
+    user_symptoms: str,
+) -> float:
+    """
+    Ask Claude to score (0.0–1.0) how relevant this molecule's properties
+    are to the therapeutic context.  Returns 0.5 on any failure.
+    """
+    if not ANTHROPIC_API_KEY:
+        logger.warning("ANTHROPIC_API_KEY not set — skipping LLM relevance signal")
+        return 0.5
+
+    # Build a compact property summary to give the LLM
+    prop_summary = (
+        f"MW={admet_data.get('mw','?')} Da, "
+        f"LogP={admet_data.get('logp','?')}, "
+        f"HBD={admet_data.get('hbd','?')}, "
+        f"HBA={admet_data.get('hba','?')}, "
+        f"TPSA={admet_data.get('tpsa','?')} Å², "
+        f"Absorption={admet_data.get('admet',{}).get('absorption','?')}%, "
+        f"Toxicity={admet_data.get('admet',{}).get('toxicity','?')}%, "
+        f"BBB={admet_data.get('bbb','?')}, "
+        f"Bioavailability={admet_data.get('bioavailability','?')}"
+    )
+    tox_flags = [f["flag"] for f in admet_data.get("tox_flags", [])]
+    tox_str = "; ".join(tox_flags) if tox_flags else "none"
+
+    prompt = f"""You are a medicinal chemist scoring molecules for therapeutic relevance.
+
+DISEASE CONTEXT:
+{disease_context}
+
+USER SYMPTOMS / INDICATION:
+{user_symptoms}
+
+MOLECULE SMILES: {smiles}
+
+ADMET PROFILE:
+{prop_summary}
+Toxicity flags: {tox_str}
+
+Task: Return ONLY a JSON object with two keys:
+  "score": float between 0.0 (completely irrelevant / harmful) and 1.0 (ideal candidate)
+  "reason": one sentence explaining the score
+
+Scoring guidelines:
+- 0.8–1.0: molecule fits the disease physchem window AND has no major toxicity flags
+- 0.5–0.7: partially fits or has minor concerns
+- 0.2–0.4: poor fit or notable toxicity issues
+- 0.0–0.2: clearly unsuitable
+
+Return only valid JSON, nothing else."""
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": ANTHROPIC_MODEL,
+                    "max_tokens": 120,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+        resp.raise_for_status()
+        raw_text = resp.json()["content"][0]["text"].strip()
+
+        # Strip any accidental markdown fences
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("```")[1]
+            if raw_text.startswith("json"):
+                raw_text = raw_text[4:]
+        parsed = json.loads(raw_text)
+        score = float(parsed.get("score", 0.5))
+        return round(max(0.0, min(1.0, score)), 4)
+
+    except Exception as exc:
+        logger.warning(f"LLM relevance call failed ({exc}); defaulting to 0.5")
+        return 0.5
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPER: build explanation text for a ranked candidate
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _build_rank_explanation(
+    rank: int,
+    candidate: CandidateInput,
+    signals: SignalBreakdown,
+    final_score: float,
+    disease: str,
+    targets: list[str],
+    weight_qml: float,
+    weight_sym: float,
+) -> str:
+    # QML interpretation
+    if candidate.qml_score >= 0.75:
+        qml_txt = f"strong QML drug-likeness ({candidate.qml_score:.2f})"
+    elif candidate.qml_score >= 0.5:
+        qml_txt = f"moderate QML score ({candidate.qml_score:.2f})"
+    else:
+        qml_txt = f"weak QML score ({candidate.qml_score:.2f})"
+
+    # Fingerprint interpretation
+    if signals.fingerprint_similarity >= 0.35:
+        fp_txt = f"high structural resemblance to known {disease} drugs (Tanimoto {signals.fingerprint_similarity:.2f})"
+    elif signals.fingerprint_similarity >= 0.15:
+        fp_txt = f"moderate structural similarity to {disease} references (Tanimoto {signals.fingerprint_similarity:.2f})"
+    else:
+        fp_txt = f"low structural overlap with known {disease} drugs (Tanimoto {signals.fingerprint_similarity:.2f})"
+
+    # Physchem fit
+    if signals.physchem_fit >= 0.80:
+        pc_txt = "excellent physicochemical fit for this indication"
+    elif signals.physchem_fit >= 0.50:
+        pc_txt = "acceptable physicochemical profile"
+    else:
+        pc_txt = "physicochemical properties fall outside the preferred window"
+
+    # LLM
+    llm_txt = ""
+    if signals.llm_used:
+        if signals.llm_score >= 0.70:
+            llm_txt = "; LLM found strong therapeutic context alignment"
+        elif signals.llm_score >= 0.45:
+            llm_txt = "; LLM found partial therapeutic relevance"
+        else:
+            llm_txt = "; LLM flagged limited therapeutic relevance"
+
+    target_str = ", ".join(targets[:3])  # show up to 3 targets
+    return (
+        f"Rank #{rank} — final score {final_score:.3f} "
+        f"(QML×{weight_qml:.1f} + relevance×{weight_sym:.1f}). "
+        f"This candidate has {qml_txt}, {fp_txt}, and {pc_txt}{llm_txt}. "
+        f"Relevant targets for {disease}: {target_str}."
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# THE ENDPOINT
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/rank_candidates", response_model=RankResponse, tags=["Ranking"])
+async def rank_candidates(request: RankRequest):
+    """
+    Rank drug candidates by combining the QML drug-likeness score with a
+    multi-signal **Symptom Relevance Score**.
+
+    **Symptom Relevance Score** blends three signals:
+
+    | Signal | Method | Weight |
+    |--------|--------|--------|
+    | Fingerprint similarity | Tanimoto vs reference drugs for the detected disease | 0.40 |
+    | Physicochemical fit | Fraction of disease-specific physchem criteria met | 0.30 |
+    | LLM semantic score | Claude judges ADMET fit for the therapeutic context | 0.30 |
+
+    **Final Score** = `weight_qml × QML_score + (1−weight_qml) × SymptomRelevance`
+
+    No model retraining required — pure post-classification reranking.
+    """
+    # ── resolve weights ───────────────────────────────────────────────────────
+    w_qml = request.weight_qml
+    w_sym = round(1.0 - w_qml, 4)
+
+    # ── resolve LLM flag ──────────────────────────────────────────────────────
+    use_llm = USE_LLM_RELEVANCE if request.use_llm is None else request.use_llm
+
+    # ── match disease profile ─────────────────────────────────────────────────
+    disease_key, profile = _match_disease_profile(request.symptoms)
+
+    # ── score each candidate ──────────────────────────────────────────────────
+    ranked_list: list[RankedCandidate] = []
+
+    for cand in request.candidates:
+        smiles = cand.smiles
+
+        # Repair SMILES
+        repaired = repair_smiles(smiles)
+        if repaired is None:
+            logger.warning(f"Skipping unparseable SMILES: {smiles}")
+            continue
+        smiles = repaired
+
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            continue
+
+        # ── signal a: fingerprint similarity ─────────────────────────────────
+        fp_sim = _fp_similarity_signal(mol, profile["ref_smiles"])
+
+        # ── signal b: physchem fit ────────────────────────────────────────────
+        pc_fit = _physchem_fit_signal(smiles, profile["physchem"])
+
+        # ── signal c: LLM ────────────────────────────────────────────────────
+        llm_score = 0.5
+        llm_used  = False
+        if use_llm:
+            try:
+                admet_data = _compute_admet(smiles)
+                llm_score = await _llm_relevance_signal(
+                    smiles,
+                    admet_data,
+                    profile["context"],
+                    request.symptoms,
+                )
+                llm_used = True
+            except Exception as e:
+                logger.warning(f"LLM signal failed for {smiles}: {e}")
+
+        # ── blend into symptom relevance ──────────────────────────────────────
+        # Weights: fp_sim 0.40, pc_fit 0.30, llm 0.30
+        symptom_relevance = round(
+            0.40 * fp_sim + 0.30 * pc_fit + 0.30 * llm_score, 4
+        )
+
+        # ── final score ───────────────────────────────────────────────────────
+        final_score = round(
+            w_qml * cand.qml_score + w_sym * symptom_relevance, 4
+        )
+
+        signals = SignalBreakdown(
+            fingerprint_similarity=fp_sim,
+            physchem_fit=pc_fit,
+            llm_score=llm_score,
+            llm_used=llm_used,
+        )
+
+        ranked_list.append(
+            RankedCandidate(
+                rank=0,            # assigned after sorting
+                smiles=smiles,
+                label=cand.label,
+                qml_score=cand.qml_score,
+                symptom_relevance=symptom_relevance,
+                final_score=final_score,
+                signals=signals,
+                explanation="",    # filled after sorting
+            )
+        )
+
+    # ── sort descending by final_score ────────────────────────────────────────
+    ranked_list.sort(key=lambda c: c.final_score, reverse=True)
+
+    # ── assign ranks + explanations ───────────────────────────────────────────
+    for i, rc in enumerate(ranked_list, start=1):
+        rc.rank = i
+        rc.explanation = _build_rank_explanation(
+            rank=i,
+            candidate=next(
+                c for c in request.candidates
+                if repair_smiles(c.smiles) == rc.smiles or c.smiles == rc.smiles
+            ),
+            signals=rc.signals,
+            final_score=rc.final_score,
+            disease=disease_key,
+            targets=profile["targets"],
+            weight_qml=w_qml,
+            weight_sym=w_sym,
+        )
+
+    return RankResponse(
+        symptoms=request.symptoms,
+        disease_matched=disease_key,
+        targets=profile["targets"],
+        weight_qml=w_qml,
+        weight_symptom=w_sym,
+        ranked=ranked_list,
+        timestamp=datetime.utcnow().isoformat(),
+    )
  
 # ── Examples ──────────────────────────────────────────────────────────────────
 
