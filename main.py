@@ -60,6 +60,22 @@ class PredictResponse(BaseModel):
 class ADMETRequest(BaseModel):
     smiles: str = Field(..., description="SMILES string to compute ADMET properties for")
 
+# ── Lab Conditions Models ─────────────────────────────────────────────────────
+
+class ConditionWarning(BaseModel):
+    parameter: str
+    value:     float
+    range:     str
+    status:    str
+
+class LabConditions(BaseModel):
+    timestamp:   str
+    temperature: Optional[float] = None
+    humidity:    Optional[float] = None
+    pressure:    Optional[float] = None
+    warnings:    List[ConditionWarning] = []
+    lab_ready:   bool
+
 # ── Global model ──────────────────────────────────────────────────────────────
 
 model_inference = None
@@ -2040,6 +2056,46 @@ async def rank_candidates(request: RankRequest):
         ranked=ranked_list,
         timestamp=datetime.utcnow().isoformat(),
     )
+
+# ── Lab Conditions (Raspberry Pi Environmental Monitor) ───────────────────────
+
+# In-memory store — resets on Space restart, which is fine
+latest_conditions: dict = {}
+conditions_history: list = []
+
+@app.post("/lab-conditions", tags=["Lab Environment"])
+async def receive_lab_conditions(data: LabConditions):
+    """
+    Raspberry Pi posts sensor readings here every 60 seconds.
+    Stores the latest reading and keeps a rolling history of 100 entries.
+    """
+    global latest_conditions
+    latest_conditions = data.dict()
+    conditions_history.append(data.dict())
+    if len(conditions_history) > 100:
+        conditions_history.pop(0)
+    return {
+        "status":    "received",
+        "lab_ready": data.lab_ready
+    }
+
+@app.get("/lab-conditions/latest", tags=["Lab Environment"])
+async def get_latest_conditions():
+    """
+    Frontend polls this every 60 seconds to update the
+    environmental status strip on the ADMET dashboard.
+    """
+    if not latest_conditions:
+        return {"message": "No readings received yet"}
+    return latest_conditions
+
+@app.get("/lab-conditions/history", tags=["Lab Environment"])
+async def get_conditions_history():
+    """
+    Returns the last 100 environmental readings.
+    Useful for session audit trail and lab notebook logging.
+    """
+    return conditions_history
  
 # ── Examples ──────────────────────────────────────────────────────────────────
 
