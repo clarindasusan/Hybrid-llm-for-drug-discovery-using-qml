@@ -1,112 +1,16 @@
----
-title: Drug Predictor API
-emoji: 💊
-colorFrom: blue
-colorTo: green
-sdk: docker
-pinned: false
----
+# React + Vite
 
-# 💊 Drug Predictor API
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-A quantum machine learning model for predicting drug-likeness from SMILES strings.
+Currently, two official plugins are available:
 
-## 🚀 Quick Start
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
 
-### API Documentation
-Visit `/docs` for interactive API documentation (Swagger UI).
+## React Compiler
 
-### Health Check
-```bash
-GET /
-GET /health
-```
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-### Predict Drug Potential
-```bash
-POST /predict
-```
+## Expanding the ESLint configuration
 
-**Request Body:**
-```json
-{
-  "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O"
-}
-```
-
-**Response:**
-```json
-{
-  "smiles": "CC(=O)OC1=CC=CC=C1C(=O)O",
-  "score": 0.8542,
-  "is_promising": true,
-  "confidence": "high"
-}
-```
-
-## 📝 Example Usage
-
-### Python
-```python
-import requests
-
-API_URL = "https://huggingface.co/spaces/YOUR-USERNAME/drug-predictor-api"
-
-# Health check
-response = requests.get(f"{API_URL}/health")
-print(response.json())
-
-# Predict
-response = requests.post(
-    f"{API_URL}/predict",
-    json={"smiles": "CC(=O)OC1=CC=CC=C1C(=O)O"}  # Aspirin
-)
-print(response.json())
-```
-
-### cURL
-```bash
-curl -X POST "YOUR-SPACE-URL/predict" \
-  -H "Content-Type: application/json" \
-  -d '{"smiles": "CCO"}'
-```
-
-### JavaScript
-```javascript
-const response = await fetch('YOUR-SPACE-URL/predict', {
-  method: 'POST',
-  headers: {'Content-Type': 'application/json'},
-  body: JSON.stringify({smiles: 'CCO'})
-});
-const data = await response.json();
-console.log(data);
-```
-
-## 🧪 Test Molecules
-
-- **Aspirin:** `CC(=O)OC1=CC=CC=C1C(=O)O`
-- **Caffeine:** `CN1C=NC2=C1C(=O)N(C(=O)N2C)C`
-- **Ibuprofen:** `CC(C)CC1=CC=C(C=C1)C(C)C(=O)O`
-- **Paracetamol:** `CC(=O)NC1=CC=C(C=C1)O`
-
-## 🔧 Model Architecture
-
-This API uses a hybrid quantum-classical machine learning model trained on molecular fingerprints and descriptors to predict drug-likeness.
-
-**Features:**
-- Morgan fingerprints (2048 bits)
-- Molecular descriptors (5 features)
-- Total: 2053 input features
-
-## 📊 Response Fields
-
-- `smiles`: The input SMILES string
-- `score`: Probability score (0-1) indicating drug-likeness
-- `is_promising`: Boolean indicating if score >= 0.5
-- `confidence`: "low", "medium", or "high" based on score distance from threshold
-
-## ⚠️ Limitations
-
-- Only accepts valid SMILES strings
-- Predictions are based on structural features only
-- Not a substitute for actual drug development processes
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.

@@ -1,0 +1,209 @@
+/* ADMETDashboard.css — full theme support */
+
+.admet-root {
+  background: var(--bg-modal);
+  border: 1px solid var(--border-primary);
+  border-radius: 20px; padding: 0; margin-top: 1.5rem; overflow: hidden;
+  font-family: 'Nunito', sans-serif;
+  animation: admetSlideIn 0.45s cubic-bezier(.4,0,.2,1) both;
+  box-shadow: var(--shadow-card);
+}
+@keyframes admetSlideIn { from{opacity:0;transform:translateY(16px)} to{opacity:1;transform:translateY(0)} }
+
+.admet-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1.5rem; padding: 1.75rem 2rem 1.25rem; border-bottom: 1px solid var(--border-divider); background: var(--gradient-header); }
+.admet-header-left { flex: 1; min-width: 0; }
+
+.admet-eyebrow { display: flex; align-items: center; gap: 7px; font-size: 0.65rem; letter-spacing: 0.22em; text-transform: uppercase; color: var(--accent-purple); font-weight: 700; margin-bottom: 0.55rem; }
+.admet-eyebrow::before { content: ''; width: 16px; height: 1px; background: var(--eyebrow-line); }
+.admet-eyebrow-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent-purple); box-shadow: 0 0 6px var(--accent-purple); animation: admetBlink 1.8s ease-in-out infinite; }
+@keyframes admetBlink { 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+.admet-title { font-family: 'Playfair Display', Georgia, serif; font-size: 1.4rem; font-weight: 700; color: var(--text-primary); margin: 0 0 0.65rem; line-height: 1.15; }
+
+.admet-smiles-pill { display: inline-flex; align-items: center; gap: 0.6rem; background: var(--bg-chip); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 0.3rem 0.75rem; max-width: 100%; overflow: hidden; }
+.admet-smiles-tag { font-size: 0.6rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--accent-purple); font-weight: 700; white-space: nowrap; }
+.admet-smiles-code { font-family: monospace; font-size: 0.78rem; color: var(--text-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.admet-header-right { display: flex; flex-direction: column; align-items: center; gap: 0.65rem; flex-shrink: 0; }
+.admet-score-ring { display: flex; justify-content: center; }
+.admet-pills { display: flex; flex-direction: column; gap: 0.4rem; width: 100%; }
+.admet-pill { display: flex; flex-direction: column; align-items: center; padding: 0.35rem 0.85rem; border-radius: 8px; border: 1px solid; text-align: center; }
+.admet-pill-label { font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase; font-weight: 700; opacity: 0.65; }
+.admet-pill-val { font-size: 0.82rem; font-weight: 700; margin-top: 1px; }
+
+.admet-pill-high     { background: rgba(110,231,183,0.08); border-color: rgba(110,231,183,0.25); color: var(--accent-green); }
+.admet-pill-moderate { background: rgba(212,175,114,0.08); border-color: rgba(212,175,114,0.25); color: var(--accent-gold); }
+.admet-pill-low      { background: rgba(248,113,113,0.08); border-color: rgba(248,113,113,0.25); color: var(--accent-red); }
+.admet-pill-likely   { background: rgba(110,231,183,0.08); border-color: rgba(110,231,183,0.25); color: var(--accent-green); }
+.admet-pill-unlikely { background: rgba(248,113,113,0.08); border-color: rgba(248,113,113,0.25); color: var(--accent-red); }
+.admet-pill-uncertain{ background: rgba(212,175,114,0.08); border-color: rgba(212,175,114,0.25); color: var(--accent-gold); }
+
+.admet-banner { display: flex; align-items: center; gap: 0.65rem; padding: 0.65rem 2rem; font-size: 0.8rem; font-weight: 600; border-bottom: 1px solid; }
+.admet-banner-icon { font-size: 0.95rem; }
+.admet-banner-pass { background: rgba(110,231,183,0.06); border-color: rgba(110,231,183,0.15); color: var(--accent-green); }
+.admet-banner-warn { background: rgba(212,175,114,0.06); border-color: rgba(212,175,114,0.15); color: var(--accent-gold); }
+.admet-banner-high { background: rgba(248,113,113,0.06); border-color: rgba(248,113,113,0.15); color: var(--accent-red); }
+
+.admet-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border-divider); background: var(--bg-tab-bar); padding: 0 1.5rem; }
+.admet-tab { padding: 0.75rem 1.1rem; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-muted); font-family: 'Nunito', sans-serif; font-size: 0.78rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; cursor: pointer; transition: all 0.2s; margin-bottom: -1px; }
+.admet-tab:hover { color: var(--text-secondary); }
+.admet-tab.active { color: var(--text-mono); border-bottom-color: var(--accent-purple); background: var(--bg-tab-active); }
+
+.admet-panel { padding: 1.75rem 2rem; }
+@keyframes admetFadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
+.admet-fade { animation: admetFadeIn 0.3s ease both; }
+
+.admet-section-title { font-family: 'Playfair Display', Georgia, serif; font-size: 0.9rem; font-weight: 600; color: var(--text-label); letter-spacing: 0.03em; margin-bottom: 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border-divider); }
+
+.admet-overview-grid { display: grid; grid-template-columns: 1fr auto; gap: 1.5rem; margin-bottom: 1.5rem; }
+.admet-section-radar { display: flex; flex-direction: column; align-items: center; }
+.admet-gauges { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; }
+.admet-gauge { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; }
+.admet-gauge-label { font-size: 0.65rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted); font-weight: 600; text-align: center; }
+
+.admet-stats-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 0.6rem; }
+.admet-stat-card { background: var(--bg-card-flat); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 0.75rem 0.65rem 0.6rem; text-align: center; position: relative; overflow: hidden; transition: border-color 0.2s; }
+.admet-stat-card.good { border-color: rgba(110,231,183,0.18); }
+.admet-stat-card.bad  { border-color: rgba(248,113,113,0.18); }
+.admet-stat-card:hover { border-color: var(--border-active); }
+.admet-stat-label { font-size: 0.6rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-muted); font-weight: 600; margin-bottom: 0.35rem; }
+.admet-stat-val { font-family: 'Playfair Display', serif; font-size: 1rem; font-weight: 700; color: var(--text-primary); line-height: 1; }
+.admet-stat-unit { font-size: 0.6rem; color: var(--text-muted); margin-left: 1px; }
+.admet-stat-indicator { width: 28px; height: 2px; border-radius: 2px; margin: 0.4rem auto 0; }
+.admet-stat-indicator.good { background: var(--accent-green); box-shadow: 0 0 6px rgba(110,231,183,0.5); }
+.admet-stat-indicator.bad  { background: var(--accent-red); box-shadow: 0 0 6px rgba(248,113,113,0.5); }
+
+.admet-props { display: flex; flex-direction: column; gap: 0.85rem; }
+.admet-prop-row { display: flex; flex-direction: column; gap: 0.3rem; }
+.admet-prop-meta { display: flex; justify-content: space-between; align-items: center; }
+.admet-prop-name { font-size: 0.78rem; color: var(--text-secondary); font-weight: 500; }
+.admet-prop-right { display: flex; align-items: center; gap: 0.5rem; }
+.admet-prop-val { font-size: 0.82rem; font-weight: 700; font-family: 'DM Mono', monospace; }
+.admet-badge { font-size: 0.6rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; padding: 0.15rem 0.45rem; border-radius: 4px; }
+.admet-prop-info { font-size: 0.68rem; color: var(--text-faint); font-style: italic; }
+.admet-prop-track { height: 4px; background: var(--bg-card-flat); border-radius: 4px; overflow: hidden; }
+.admet-prop-fill { height: 100%; border-radius: 4px; transition: width 0.9s cubic-bezier(.4,0,.2,1); }
+
+.admet-two-col { display: flex; gap: 1.5rem; align-items: flex-start; }
+.admet-section-summary { flex: 0 0 200px; }
+.admet-summary-items { display: flex; flex-direction: column; gap: 0.65rem; }
+.admet-summary-item { display: flex; align-items: flex-start; gap: 0.65rem; padding: 0.65rem 0.85rem; border-radius: 10px; border: 1px solid; }
+.admet-summary-item.pass    { background: rgba(110,231,183,0.06); border-color: rgba(110,231,183,0.2); }
+.admet-summary-item.fail    { background: rgba(248,113,113,0.06); border-color: rgba(248,113,113,0.2); }
+.admet-summary-item.neutral { background: var(--bg-chip); border-color: var(--border-subtle); }
+.admet-summary-icon { font-size: 0.85rem; margin-top: 1px; flex-shrink: 0; }
+.admet-summary-item.pass    .admet-summary-icon { color: var(--accent-green); }
+.admet-summary-item.fail    .admet-summary-icon { color: var(--accent-red); }
+.admet-summary-item.neutral .admet-summary-icon { color: var(--accent-purple); }
+.admet-summary-main { font-size: 0.8rem; font-weight: 700; color: var(--text-label); margin-bottom: 2px; }
+.admet-summary-sub  { font-size: 0.7rem; color: var(--text-muted); }
+
+.admet-section-perm { flex: 0 0 175px; }
+.admet-perm-cards { display: flex; flex-direction: column; gap: 0.5rem; }
+.admet-perm-card { padding: 0.75rem; border-radius: 10px; border: 1px solid; text-align: center; }
+.admet-perm-card.pass { background: rgba(110,231,183,0.07); border-color: rgba(110,231,183,0.25); }
+.admet-perm-card.fail { background: rgba(248,113,113,0.07); border-color: rgba(248,113,113,0.25); }
+.admet-perm-card.warn { background: rgba(212,175,114,0.07); border-color: rgba(212,175,114,0.25); }
+.admet-perm-name { font-size: 0.6rem; letter-spacing: 0.15em; text-transform: uppercase; font-weight: 700; color: var(--text-muted); margin-bottom: 0.25rem; }
+.admet-perm-val  { font-size: 1rem; font-weight: 800; color: var(--text-primary); line-height: 1; margin-bottom: 0.2rem; }
+.admet-perm-sub  { font-size: 0.65rem; color: var(--text-muted); }
+
+.admet-cyp-list { display: flex; flex-direction: column; gap: 0.4rem; }
+.admet-cyp-item { display: flex; align-items: center; gap: 0.5rem; font-size: 0.78rem; font-weight: 600; padding: 0.3rem 0.6rem; border-radius: 6px; }
+.admet-cyp-item.pass { color: var(--accent-green); background: rgba(110,231,183,0.07); }
+.admet-cyp-item.warn { color: var(--accent-gold); background: rgba(212,175,114,0.07); }
+.admet-cyp-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+
+.admet-tox-list { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 1rem; }
+.admet-tox-item { display: flex; align-items: center; gap: 0.85rem; padding: 0.8rem 1rem; border-radius: 10px; border: 1px solid; }
+.admet-tox-pass { background: rgba(110,231,183,0.06); border-color: rgba(110,231,183,0.2); }
+.admet-tox-warn { background: rgba(212,175,114,0.06); border-color: rgba(212,175,114,0.2); }
+.admet-tox-high { background: rgba(248,113,113,0.06); border-color: rgba(248,113,113,0.2); }
+.admet-tox-icon { width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 0.9rem; flex-shrink: 0; }
+.admet-tox-icon-pass { background: rgba(110,231,183,0.12); color: var(--accent-green); }
+.admet-tox-icon-warn { background: rgba(212,175,114,0.12); color: var(--accent-gold); }
+.admet-tox-icon-high { background: rgba(248,113,113,0.12); color: var(--accent-red); }
+.admet-tox-body { flex: 1; }
+.admet-tox-flag { font-size: 0.82rem; font-weight: 700; color: var(--text-label); margin-bottom: 2px; }
+.admet-tox-risk { font-size: 0.72rem; color: var(--text-muted); }
+.admet-tox-badge { font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; padding: 0.2rem 0.55rem; border-radius: 50px; border: 1px solid; white-space: nowrap; }
+.admet-tox-badge-pass { color: var(--accent-green); border-color: rgba(110,231,183,0.3); background: rgba(110,231,183,0.08); }
+.admet-tox-badge-warn { color: var(--accent-gold); border-color: rgba(212,175,114,0.3); background: rgba(212,175,114,0.08); }
+.admet-tox-badge-high { color: var(--accent-red); border-color: rgba(248,113,113,0.3); background: rgba(248,113,113,0.08); }
+
+.admet-disclaimer { margin-top: 1.25rem; padding: 0.65rem 1rem; background: rgba(212,175,114,0.05); border: 1px solid rgba(212,175,114,0.15); border-radius: 8px; color: rgba(212,175,114,0.7); font-size: 0.73rem; line-height: 1.6; }
+
+.admet-donut-wrap { display: flex; align-items: center; gap: 1.25rem; flex-wrap: wrap; }
+.admet-donut-legend { display: flex; flex-direction: column; gap: 0.35rem; }
+.admet-donut-item { display: flex; align-items: center; gap: 0.45rem; font-size: 0.75rem; color: var(--text-secondary); }
+.admet-donut-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.admet-donut-el { font-weight: 700; color: var(--text-label); min-width: 20px; }
+.admet-donut-pct { color: var(--text-muted); }
+
+.admet-struct-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.6rem; margin-bottom: 0.25rem; }
+.admet-struct-item { background: var(--bg-card-flat); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 0.6rem; text-align: center; }
+.admet-struct-val { font-family: 'Playfair Display', serif; font-size: 1.1rem; font-weight: 700; color: var(--text-mono); line-height: 1; margin-bottom: 0.25rem; }
+.admet-struct-label { font-size: 0.62rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); font-weight: 600; }
+
+.admet-elem-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.admet-elem-row { display: flex; align-items: center; gap: 0.65rem; }
+.admet-elem-symbol { font-size: 0.78rem; font-weight: 700; color: var(--text-mono); min-width: 22px; font-family: 'DM Mono', monospace; }
+.admet-elem-track { flex: 1; height: 5px; background: var(--bg-card-flat); border-radius: 5px; overflow: hidden; }
+.admet-elem-fill { height: 100%; background: var(--gradient-main); border-radius: 5px; transition: width 0.9s cubic-bezier(.4,0,.2,1); }
+.admet-elem-count { font-size: 0.75rem; font-weight: 700; color: var(--text-secondary); min-width: 18px; text-align: right; font-family: 'DM Mono', monospace; }
+
+.admet-footer { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 2rem; border-top: 1px solid var(--border-divider); background: var(--bg-tab-bar); }
+.admet-footer-note { font-size: 0.7rem; color: var(--text-faint); line-height: 1.5; flex: 1; margin: 0; }
+.admet-close-btn { flex-shrink: 0; padding: 0.55rem 1.35rem; background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.25); border-radius: 8px; color: var(--accent-red); font-family: 'Nunito', sans-serif; font-size: 0.78rem; font-weight: 700; cursor: pointer; transition: all 0.2s; letter-spacing: 0.04em; }
+.admet-close-btn:hover { background: rgba(248,113,113,0.15); border-color: rgba(248,113,113,0.5); }
+
+.admet-parse-error { padding: 2rem; text-align: center; color: var(--accent-red); font-size: 0.85rem; }
+.admet-parse-error code { font-family: monospace; color: var(--text-mono); }
+.admet-no-data { color: var(--text-faint); font-size: 0.82rem; font-style: italic; padding: 0.5rem; }
+
+.admet-page { min-height: 100vh; background: var(--bg); padding: 80px 5% 80px; font-family: 'Nunito', sans-serif; position: relative; transition: background 0.3s; }
+.admet-page::before { content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0; background: var(--bg-radial); }
+.admet-page .admet-root { max-width: 900px; margin: 0 auto; position: relative; z-index: 1; }
+
+.admet-topbar { position: fixed; top: 18px; right: 28px; z-index: 1000; display: flex; align-items: center; gap: 0.6rem; }
+.admet-back-btn { padding: 0.45rem 1.1rem; background: var(--bg-chip); border: 1px solid var(--border-primary); color: var(--accent-light); border-radius: 50px; cursor: pointer; font-family: 'Nunito', sans-serif; font-size: 0.82rem; font-weight: 600; transition: all 0.2s; backdrop-filter: blur(10px); }
+.admet-back-btn:hover { background: var(--bg-chip-hover); border-color: var(--accent-purple); color: var(--text-primary); }
+
+.admet-download-btn { display: flex; align-items: center; gap: 0.5rem; padding: 0.45rem 1.1rem; background: rgba(212,175,114,0.15); border: 1px solid rgba(212,175,114,0.4); border-radius: 50px; color: var(--accent-gold); font-family: 'Nunito', sans-serif; font-size: 0.82rem; font-weight: 700; cursor: pointer; transition: all 0.2s; backdrop-filter: blur(10px); white-space: nowrap; }
+.admet-download-btn:hover:not(:disabled) { background: rgba(212,175,114,0.28); border-color: rgba(212,175,114,0.7); box-shadow: 0 0 16px rgba(212,175,114,0.25); }
+.admet-download-btn:disabled { opacity: 0.7; cursor: not-allowed; }
+.admet-dl-icon { font-size: 0.9rem; }
+.admet-dl-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgba(212,175,114,0.3); border-top-color: var(--accent-gold); border-radius: 50%; animation: admetSpin 0.6s linear infinite; }
+@keyframes admetSpin { to { transform: rotate(360deg); } }
+
+.admet-download-group { position: relative; }
+.admet-download-menu { position: absolute; top: calc(100% + 8px); right: 0; background: var(--bg-dropdown); border: 1px solid rgba(212,175,114,0.25); border-radius: 14px; padding: 0.5rem; min-width: 230px; backdrop-filter: blur(20px); box-shadow: var(--shadow-dropdown); animation: admetMenuIn 0.18s cubic-bezier(.4,0,.2,1) both; z-index: 100; }
+@keyframes admetMenuIn { from{opacity:0;transform:translateY(-6px) scale(0.97)} to{opacity:1;transform:translateY(0) scale(1)} }
+.admet-download-option { display: flex; align-items: center; gap: 0.85rem; width: 100%; padding: 0.75rem 0.85rem; background: none; border: none; border-radius: 10px; cursor: pointer; transition: background 0.15s; text-align: left; }
+.admet-download-option:hover { background: rgba(212,175,114,0.08); }
+.admet-dl-option-icon { font-size: 1.3rem; flex-shrink: 0; line-height: 1; }
+.admet-dl-option-title { font-size: 0.82rem; font-weight: 700; color: var(--text-label); margin-bottom: 2px; }
+.admet-dl-option-sub { font-size: 0.68rem; color: var(--text-muted); }
+
+.admet-vr-btn { flex-shrink: 0; display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1.25rem; background: rgba(96,165,250,0.12); border: 1px solid rgba(96,165,250,0.35); border-radius: 50px; color: var(--accent-blue); font-family: 'Nunito', sans-serif; font-size: 0.82rem; font-weight: 700; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+.admet-vr-btn:hover:not(:disabled) { background: rgba(96,165,250,0.25); border-color: var(--accent-blue); box-shadow: 0 0 18px rgba(96,165,250,0.25); }
+.admet-vr-btn--disabled, .admet-vr-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.admet-vr-icon { font-size: 0.9rem; animation: admetVrPulse 2s ease-in-out infinite; }
+@keyframes admetVrPulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.admet-vr-na { font-size: 0.68rem; opacity: 0.6; font-weight: 400; }
+
+.admet-retry-btn { margin-top: 1rem; padding: 0.5rem 1.5rem; border-radius: 8px; background: var(--bg-chip); border: 1px solid var(--border-primary); color: var(--accent-purple); font-size: 0.85rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+.admet-retry-btn:hover { background: var(--bg-chip-hover); }
+
+@media (max-width: 700px) {
+  .admet-header { flex-direction: column; }
+  .admet-header-right { flex-direction: row; align-items: center; justify-content: space-between; width: 100%; }
+  .admet-overview-grid { grid-template-columns: 1fr; }
+  .admet-stats-row { grid-template-columns: repeat(3, 1fr); }
+  .admet-two-col { flex-direction: column; }
+  .admet-section-summary, .admet-section-perm { flex: unset; }
+  .admet-tabs { overflow-x: auto; padding: 0 1rem; }
+  .admet-tab { font-size: 0.7rem; padding: 0.65rem 0.75rem; white-space: nowrap; }
+  .admet-panel { padding: 1.25rem 1rem; }
+  .admet-footer { flex-direction: column; align-items: flex-start; }
+}
